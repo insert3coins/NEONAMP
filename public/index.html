@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEONAMP</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230d0820'/%3E%3Cpath d='M11 8l14 8-14 8z' fill='%2321e6c1'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="stage">
+  <div class="amp" id="amp">
+
+    <!-- ══════════ TITLEBAR ══════════ -->
+    <header class="titlebar">
+      <span class="logo">NEON<em>AMP</em></span>
+      <span class="tag">insert3coins edition</span>
+      <span class="winbtns" aria-hidden="true"><i></i><i></i><i></i></span>
+    </header>
+
+    <!-- ══════════ MAIN DECK ══════════ -->
+    <section class="panel deck">
+      <div class="display lcd">
+        <img class="art hidden" id="art" alt="" draggable="false">
+        <div class="lcd-left">
+          <div class="time" id="timeMain" title="Click to toggle time remaining">00:00</div>
+          <div class="playstate" id="playState">■ STOPPED</div>
+        </div>
+        <canvas id="vis" width="300" height="76" title="Click to cycle visualizers · use VIS for direct selection" aria-hidden="true"></canvas>
+      </div>
+
+      <div class="trackline lcd">
+          <div class="marquee"><span id="marqueeText">NEONAMP READY ▞▞ PRESS EJECT FOR PLAYLIST MANAGER ▞▞ COIN-OPERATED AUDIO</span></div>
+      </div>
+
+      <div class="metarow">
+        <span class="lcd chip" id="kbps">--- KBPS</span>
+        <span class="lcd chip" id="khz">-- KHZ</span>
+        <span class="lcd chip" id="chan">STEREO</span>
+        <span class="spacer"></span>
+        <button class="mode" id="btnVis" title="Choose visualizer">VIS</button>
+        <button class="mode" id="btnNorm" title="Loudness normalization">NORM</button>
+        <button class="mode" id="btnShuffle" title="Shuffle (S)">SHUF</button>
+        <button class="mode" id="btnRepeat" title="Repeat: off / all / one (R)">REP</button>
+      </div>
+
+      <input type="range" id="seek" class="seek" min="0" max="1000" value="0" step="1" aria-label="Seek">
+
+      <div class="transport">
+        <button class="tbtn" id="btnPrev" title="Previous (Z)">
+          <svg viewBox="0 0 24 24"><path d="M6 5h3v14H6zM20 5v14L9.5 12z"/></svg>
+        </button>
+        <button class="tbtn big" id="btnPlay" title="Play (X)">
+          <svg viewBox="0 0 24 24"><path d="M7 4l14 8-14 8z"/></svg>
+        </button>
+        <button class="tbtn" id="btnPause" title="Pause (C)">
+          <svg viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+        </button>
+        <button class="tbtn" id="btnStop" title="Stop (V)">
+          <svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/></svg>
+        </button>
+        <button class="tbtn" id="btnNext" title="Next (B)">
+          <svg viewBox="0 0 24 24"><path d="M15 5h3v14h-3zM4 5l10.5 7L4 19z"/></svg>
+        </button>
+        <button class="tbtn eject" id="btnEject" title="Open playlist manager (E)">
+          <svg viewBox="0 0 24 24"><path d="M12 5l8 9H4zM4 17h16v3H4z"/></svg>
+        </button>
+        <span class="spacer"></span>
+        <button class="mode" id="btnEqToggle" title="Show/hide equalizer">EQ</button>
+        <button class="mode" id="btnPlToggle" title="Show/hide playlist">PL</button>
+        <button class="mode" id="btnTheme" title="Theme: NEON (click to cycle)">THM</button>
+      </div>
+
+      <div class="mixers">
+        <label class="mix">
+          <span class="mixlabel">VOL</span>
+          <input type="range" id="vol" min="0" max="100" value="80" aria-label="Volume">
+          <span class="mixval lcd" id="volVal">80</span>
+        </label>
+        <label class="mix">
+          <span class="mixlabel">BAL</span>
+          <input type="range" id="bal" min="-100" max="100" value="0" title="Double-click to center" aria-label="Balance">
+          <span class="mixval lcd" id="balVal">CTR</span>
+        </label>
+      </div>
+    </section>
+
+    <!-- ══════════ EQUALIZER ══════════ -->
+    <section class="panel" id="eqPanel">
+      <div class="phead">
+        <span class="ptitle">EQUALIZER</span>
+        <span class="spacer"></span>
+        <button class="mode" id="btnDsp" title="Open reorderable DSP rack">DSP</button>
+        <button class="mode" id="btnEqOn">ON</button>
+        <button class="mode" id="btnEqObs" title="Route the OBS jukebox's audio through this EQ (capture caveat in README)">OBS</button>
+        <select class="mode presetsel" id="eqPreset" title="Winamp-style EQ presets"></select>
+      </div>
+      <div class="eqbands" id="eqBands"><!-- built by app.js --></div>
+    </section>
+
+    <!-- ══════════ PLAYLIST ══════════ -->
+    <section class="panel" id="plPanel">
+      <div class="phead">
+        <span class="ptitle">PLAYLIST</span>
+        <span class="plname lcd" id="plName"></span>
+        <span class="spacer"></span>
+        <span class="pltotal lcd" id="plTotal">0 TRK / 0:00</span>
+      </div>
+      <ol class="pllist" id="plList"></ol>
+      <div class="plbtns">
+        <button class="btn" id="btnAdd" title="Open playlist manager">MANAGE</button>
+        <button class="btn" id="btnRem" title="Remove selected (Del)">REM</button>
+        <button class="btn" id="btnClr" title="Clear playlist">CLR</button>
+        <button class="btn" id="btnUtil" title="Playlist utilities">UTIL</button>
+        <span class="spacer"></span>
+        <button class="btn" id="btnSave">SAVE</button>
+        <button class="btn" id="btnLoad">LOAD</button>
+      </div>
+    </section>
+
+    <footer class="statusbar">INSERT3COINS // NEONAMP v1.5 // COIN-OPERATED AUDIO</footer>
+  </div>
+</div>
+
+<div class="deck-context hidden" id="deckContextMenu" role="menu" aria-label="Player actions"></div>
+
+<!-- ══════════ MODAL ══════════ -->
+<div class="modal hidden" id="modal">
+  <div class="mbox panel">
+    <div class="phead">
+      <span class="ptitle" id="modalTitle">PLAYLIST</span>
+      <span class="spacer"></span>
+      <button class="mode" id="modalClose">✕</button>
+    </div>
+    <div class="mbody" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="toast lcd" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

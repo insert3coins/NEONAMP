@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEONAMP // PLAYLIST CONTROL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="playlist.css">
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <a class="brand" href="/" title="Back to player">NEON<span>AMP</span></a>
+    <div class="division">PLAYLIST CONTROL</div>
+    <div class="connection" id="connection"><i></i><span>CONNECTING</span></div>
+    <nav><a href="/">PLAYER</a><a href="/obs?demo=1" target="_blank">OBS PREVIEW</a></nav>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar panel">
+      <div class="panelhead">
+        <div><span class="eyebrow">SAVED SETS</span><h1>PLAYLISTS</h1></div>
+        <button class="iconbtn" id="refreshPlaylists" title="Refresh">↻</button>
+      </div>
+      <div class="sideactions">
+        <button class="button primary" id="newPlaylist">＋ NEW PLAYLIST</button>
+      </div>
+      <label class="search"><span>⌕</span><input id="playlistFilter" type="search" placeholder="FILTER PLAYLISTS" autocomplete="off"></label>
+      <ul class="playlistlist" id="playlistList"></ul>
+      <div class="sidefoot"><span id="playlistCount">0 PLAYLISTS</span><span>FILEPATH MODE</span></div>
+    </aside>
+
+    <section class="workspace panel">
+      <div class="nowstrip">
+        <div class="signal"><i></i><span id="liveState">SIGNAL STANDBY</span></div>
+        <div class="nowcopy">
+          <span class="eyebrow">NOW PLAYING</span>
+          <strong id="nowTitle">WAITING FOR PLAYER…</strong>
+          <small id="nowMeta">OPEN THE PLAYER OR OBS JUKEBOX</small>
+        </div>
+        <div class="nowtime" id="nowTime">00:00</div>
+      </div>
+
+      <section class="controlrack" aria-label="Player controls">
+        <div class="rackmain">
+          <div class="transport" aria-label="Transport">
+            <button class="transportbtn" id="ctlPrev" title="Previous">◀◀</button>
+            <button class="transportbtn hot" id="ctlPlay" title="Play or resume">▶</button>
+            <button class="transportbtn" id="ctlPause" title="Pause">Ⅱ</button>
+            <button class="transportbtn" id="ctlStop" title="Stop">■</button>
+            <button class="transportbtn" id="ctlNext" title="Next">▶▶</button>
+          </div>
+          <label class="rackrange"><span>VOL <b id="ctlVolVal">80</b></span><input id="ctlVol" type="range" min="0" max="100" value="80"></label>
+          <label class="rackrange"><span>BAL <b id="ctlBalVal">C</b></span><input id="ctlBal" type="range" min="-100" max="100" value="0"></label>
+          <div class="racktoggles">
+            <button class="minitoggle" id="ctlNorm">NORM</button>
+            <button class="minitoggle" id="ctlShuffle">SHUF</button>
+            <button class="minitoggle" id="ctlRepeat">REP: OFF</button>
+          </div>
+          <label class="rackselect"><span>VISUALIZER</span><select id="ctlVis">
+            <option value="bars">SPECTRUM BARS</option><option value="scope">OSCILLOSCOPE</option>
+            <option value="vu">VU METER</option><option value="radial">RADIAL CORE</option>
+            <option value="waterfall">WATERFALL</option><option value="dots">DOT MATRIX</option>
+            <option value="particles">PARTICLE BURST</option><option value="off">OFF</option>
+          </select></label>
+          <label class="rackselect"><span>THEME</span><select id="ctlTheme">
+            <option>NEON</option><option>C64</option><option>AMBER TERM</option><option>VAPORWAVE</option><option>GREEN PHOS</option>
+          </select></label>
+        </div>
+        <details class="sounddetails" id="soundDetails">
+          <summary><span>EQUALIZER + DSP RACK</span><small id="controlStatus">READY TO CONTROL</small></summary>
+          <div class="soundgrid">
+            <section class="eqcontrol">
+              <div class="rackhead"><strong>10-BAND EQUALIZER</strong><button class="minitoggle" id="ctlEqOn">EQ ON</button><button class="minitoggle" id="ctlObsEq">OBS EQ</button><select id="ctlEqPreset"></select></div>
+              <div class="eqbands" id="ctlEqBands"></div>
+            </section>
+            <section class="dspcontrol">
+              <div class="rackhead"><strong>DSP MODULE CHAIN</strong><select id="ctlDspPreset"></select></div>
+              <div class="dspadd"><select id="ctlDspType"></select><button class="button" id="ctlDspAdd">＋ ADD</button></div>
+              <div class="dsplist" id="ctlDspList"></div>
+            </section>
+          </div>
+        </details>
+      </section>
+
+      <div class="workhead">
+        <div class="identity">
+          <span class="eyebrow">EDITING PLAYLIST</span>
+          <div class="namewrap"><h2 id="activeName">SELECT A PLAYLIST</h2><span class="dirty hidden" id="dirty">UNSAVED</span></div>
+          <div class="stats"><span id="trackCount">0 TRACKS</span><span id="totalTime">0:00 TOTAL</span></div>
+        </div>
+        <div class="mainactions">
+          <button class="button play" id="loadPlay" disabled>▶ LOAD + PLAY</button>
+          <button class="button" id="saveChanges" disabled>SAVE CHANGES</button>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <button class="button" id="addFiles" disabled>＋ ADD FILE PATHS</button>
+        <button class="button" id="addStream" disabled>＋ RADIO STREAM</button>
+        <button class="button" id="editTrack" disabled>EDIT METADATA</button>
+        <button class="button danger" id="removeTrack" disabled>REMOVE</button>
+        <span class="spacer"></span>
+        <button class="button compact" id="moveUp" disabled title="Move selected up">↑</button>
+        <button class="button compact" id="moveDown" disabled title="Move selected down">↓</button>
+        <select class="select" id="sortTracks" disabled title="Sort playlist">
+          <option value="">SORT…</option>
+          <option value="artist">ARTIST</option>
+          <option value="title">TITLE</option>
+          <option value="album">ALBUM</option>
+          <option value="duration">DURATION</option>
+          <option value="random">RANDOMIZE</option>
+          <option value="reverse">REVERSE</option>
+          <option value="dedupe">REMOVE DUPLICATES</option>
+        </select>
+        <button class="button" id="exportM3U" disabled>EXPORT M3U</button>
+        <button class="button danger ghost" id="deletePlaylist" disabled>DELETE PLAYLIST</button>
+      </div>
+
+      <div class="tracktable">
+        <div class="trackhead"><span>#</span><span>TITLE / ARTIST</span><span>ALBUM</span><span>TYPE</span><span>TIME</span></div>
+        <ol class="tracklist" id="trackList"></ol>
+        <div class="empty" id="emptyState">
+          <div class="emptyicon">▸</div>
+          <strong>NO PLAYLIST SELECTED</strong>
+          <span>CHOOSE ONE ON THE LEFT OR CREATE A NEW PLAYLIST</span>
+        </div>
+      </div>
+
+      <footer class="hint">RIGHT-CLICK FOR ACTIONS <b>▸</b> DOUBLE-CLICK PLAYS IN THE ACTIVE PLAYER/OBS <b>▸</b> DRAG TO REORDER <b>▸</b> SOURCE AUDIO STAYS IN PLACE</footer>
+    </section>
+  </main>
+</div>
+
+<div class="contextmenu hidden" id="contextMenu" role="menu" aria-label="Playlist actions"></div>
+
+<div class="modal hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="dialog panel">
+    <div class="dialoghead"><h3 id="modalTitle">PLAYLIST</h3><button class="iconbtn" id="modalClose">✕</button></div>
+    <div class="dialogbody" id="modalBody"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="playlist.js"></script>
+</body>
+</html>

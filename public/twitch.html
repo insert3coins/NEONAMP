@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEONAMP // TWITCH CONSOLE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --void:  #0d0820;
+    --panel: rgba(13, 8, 32, .92);
+    --inset: rgba(6, 3, 18, .92);
+    --line:  #2b2350;
+    --line2: #43377c;
+    --cyan:  #21e6c1;
+    --mag:   #ff4f9a;
+    --amber: #ffb24d;
+    --dim:   #6f6d99;
+    --ink:   #eae6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(1200px 500px at 50% -10%, rgba(67, 55, 124, .35), transparent 60%),
+      #070313;
+    color: var(--ink);
+    font-family: 'Rajdhani', sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 28px 14px 60px;
+  }
+  .col { width: 100%; max-width: 640px; display: grid; gap: 14px; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: 0 0 24px rgba(33, 230, 193, .08), inset 0 0 28px rgba(0, 0, 0, .5);
+    position: relative;
+  }
+  .panel::before {
+    content: '';
+    position: absolute; inset: -1px; pointer-events: none;
+    background:
+      linear-gradient(var(--cyan), var(--cyan)) top left / 12px 1px,
+      linear-gradient(var(--cyan), var(--cyan)) top left / 1px 12px,
+      linear-gradient(var(--mag), var(--mag)) bottom right / 12px 1px,
+      linear-gradient(var(--mag), var(--mag)) bottom right / 1px 12px;
+    background-repeat: no-repeat;
+  }
+  .phead {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(43, 35, 80, .5), transparent);
+  }
+  .ptitle {
+    font-family: 'Orbitron', sans-serif; font-weight: 700;
+    font-size: 11px; letter-spacing: 3px; color: var(--cyan);
+    text-shadow: 0 0 7px rgba(33, 230, 193, .7);
+  }
+  .pbody { padding: 12px; display: grid; gap: 10px; }
+  .spacer { flex: 1; }
+
+  .logo { font-family: 'Orbitron', sans-serif; font-weight: 900; font-size: 17px; letter-spacing: 3px; color: var(--cyan); text-shadow: 0 0 9px rgba(33,230,193,.8); }
+  .logo em { font-style: normal; color: var(--mag); text-shadow: 0 0 9px rgba(255,79,154,.8); }
+  a.back { color: var(--dim); text-decoration: none; font-size: 12px; letter-spacing: 1.5px; font-weight: 600; }
+  a.back:hover { color: var(--cyan); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .chip {
+    font-family: 'Share Tech Mono', monospace; font-size: 10px; letter-spacing: 1px;
+    color: var(--dim); background: var(--inset); border: 1px solid var(--line); padding: 4px 8px;
+  }
+  .chip.lit  { color: var(--cyan); text-shadow: 0 0 5px rgba(33,230,193,.5); border-color: var(--cyan); }
+  .chip.warn { color: var(--amber); border-color: var(--amber); }
+  .chip.bad  { color: var(--mag); border-color: var(--mag); }
+
+  label.f { display: grid; gap: 3px; font-weight: 600; font-size: 10px; letter-spacing: 2px; color: var(--dim); }
+  input[type='text'], input[type='password'], input[type='number'] {
+    background: var(--inset); border: 1px solid var(--line); color: var(--ink);
+    font-family: 'Share Tech Mono', monospace; font-size: 12px; padding: 7px 9px; outline: none; width: 100%;
+  }
+  input:focus { border-color: var(--cyan); box-shadow: 0 0 8px rgba(33, 230, 193, .25); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row > .f { flex: 1; min-width: 180px; }
+
+  .chk { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 1px; color: var(--ink); }
+  .chk input { accent-color: var(--cyan); width: 14px; height: 14px; }
+  .chk small { color: var(--dim); letter-spacing: .5px; }
+
+  button {
+    font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 11px; letter-spacing: 2px;
+    background: var(--inset); color: var(--ink); border: 1px solid var(--line2);
+    padding: 8px 14px; cursor: pointer; text-transform: uppercase;
+  }
+  button:hover { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 10px rgba(33,230,193,.25); }
+  button.mag:hover { border-color: var(--mag); color: var(--mag); box-shadow: 0 0 10px rgba(255,79,154,.3); }
+  button.amber:hover { border-color: var(--amber); color: var(--amber); box-shadow: 0 0 10px rgba(255,178,77,.3); }
+
+  .hint { font-family: 'Share Tech Mono', monospace; font-size: 10px; color: var(--dim); letter-spacing: .5px; line-height: 1.5; }
+  .hint b { color: var(--amber); font-weight: 400; }
+
+  .np {
+    font-family: 'Share Tech Mono', monospace; font-size: 12px; color: var(--ink);
+    background: var(--inset); border: 1px solid var(--line); padding: 8px 10px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .np .lab { color: var(--dim); }
+  .np .val { color: var(--cyan); }
+
+  pre.log {
+    font-family: 'Share Tech Mono', monospace; font-size: 10.5px; line-height: 1.55;
+    background: var(--inset); border: 1px solid var(--line); color: var(--dim);
+    padding: 8px 10px; height: 150px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  pre.log .ok { color: var(--cyan); }
+  pre.log .err { color: var(--mag); }
+
+  .statusbar {
+    text-align: center; font-size: 9px; letter-spacing: 2.5px; color: var(--dim);
+    font-weight: 600; text-transform: uppercase; padding-top: 4px;
+  }
+  .toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(8px);
+    font-family: 'Share Tech Mono', monospace; font-size: 11px; letter-spacing: 1px;
+    background: var(--inset); border: 1px solid var(--cyan); color: var(--cyan);
+    padding: 8px 14px; opacity: 0; pointer-events: none; transition: all .25s;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.warn { border-color: var(--mag); color: var(--mag); }
+</style>
+</head>
+<body>
+<div class="col">
+
+  <div class="panel">
+    <div class="phead">
+      <span class="logo">NEON<em>AMP</em></span>
+      <span class="ptitle">TWITCH CONSOLE</span>
+      <span class="spacer"></span>
+      <a class="back" href="/">◂ BACK TO DECK</a>
+    </div>
+    <div class="pbody">
+      <div class="chips" id="statusChips"><span class="chip">LOADING…</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="phead"><span class="ptitle">CONNECTION CONFIG</span></div>
+    <div class="pbody">
+      <div class="row">
+        <label class="f">CLIENT ID<input type="text" id="clientId" autocomplete="off" spellcheck="false"></label>
+        <label class="f">CLIENT SECRET<input type="password" id="clientSecret" autocomplete="off" placeholder="paste secret"></label>
+      </div>
+      <div class="row">
+        <label class="f">REDIRECT URL<input type="text" id="redirectUrl" spellcheck="false"></label>
+        <label class="f">BROADCASTER USER ID<input type="text" id="broadcasterUserId" spellcheck="false" placeholder="auto-filled on login"></label>
+      </div>
+      <label class="chk"><input type="checkbox" id="autoConnect"> AUTO-CONNECT CHAT ON SERVER BOOT</label>
+      <div class="hint">Create an app at <b>dev.twitch.tv/console/apps</b> (Confidential). Localhost callbacks are normal — Twitch allows <b>http://localhost</b> redirects, and this URL must <b>exactly match</b> one registered on your app. Reusing the old player's app? Just set this to its registered URL (e.g. <b>http://localhost:4000/auth</b>) — NEONAMP listens on that port too. Log in once from the PC running the server; tokens persist after that. Scopes: <b>user:read:chat user:write:chat</b>.</div>
+      <div class="row">
+        <button id="saveBtn">SAVE CONFIG</button>
+        <button id="reloadBtn">RELOAD</button>
+        <span class="spacer"></span>
+        <button class="mag" id="loginBtn">LOGIN WITH TWITCH</button>
+        <button id="connBtn">CONNECT CHAT</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="phead"><span class="ptitle">CHAT INTEGRATION</span></div>
+    <div class="pbody">
+      <label class="chk"><input type="checkbox" id="songCommandEnabled"> !SONG COMMAND <small>— everyone, cooldown below</small></label>
+      <label class="chk"><input type="checkbox" id="commandsEnabled"> !NEXT / !PREV / !PAUSE / !RESUME <small>— broadcaster, mods, VIPs</small></label>
+      <label class="chk"><input type="checkbox" id="nowPlayingEnabled"> AUTO-ANNOUNCE TRACK CHANGES</label>
+      <div class="row">
+        <label class="f" style="flex:3">NOW-PLAYING TEMPLATE<input type="text" id="nowPlayingTemplate" spellcheck="false"></label>
+        <label class="f" style="flex:1;min-width:120px">!SONG COOLDOWN (SEC)<input type="number" id="songCommandCooldownSec" min="0" max="3600"></label>
+      </div>
+      <div class="hint">Variables: <b>{title} {artist} {artistUrl} {album} {year} {idx} {count} {file}</b> — {artistUrl} reads the file's website tags (WOAR / TXXX / WXXX) and falls back to the comment tag.</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="phead"><span class="ptitle">NOW SPINNING</span><span class="spacer"></span><span class="chip" id="npState">—</span></div>
+    <div class="pbody">
+      <div class="np" id="npTrack"><span class="lab">TRACK:</span> —</div>
+      <div class="np" id="npPreview"><span class="lab">!SONG PREVIEW:</span> —</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="phead"><span class="ptitle">TEST CONSOLE</span></div>
+    <div class="pbody">
+      <div class="row">
+        <button id="simSong">SIMULATE !SONG</button>
+        <button id="simNext" class="amber">SIMULATE !NEXT (AS MOD)</button>
+        <button id="simPause" class="amber">SIMULATE !PAUSE (AS MOD)</button>
+      </div>
+      <div class="row">
+        <label class="f" style="flex:1">SEND A LINE TO CHAT<input type="text" id="sendLine" placeholder="insert3coins test — coin-operated audio" spellcheck="false"></label>
+        <button class="mag" id="sendBtn" style="align-self:end">SEND</button>
+      </div>
+      <pre class="log" id="log">READY.</pre>
+    </div>
+  </div>
+
+  <div class="statusbar">INSERT3COINS // NEONAMP TWITCH CONSOLE // COIN-OPERATED AUDIO</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+const $ = (s) => document.querySelector(s);
+const logEl = $('#log'), toastEl = $('#toast');
+let toastTimer = null;
+
+function toast(msg, warn = false) {
+  toastEl.textContent = msg;
+  toastEl.classList.toggle('warn', warn);
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2200);
+}
+function log(msg, cls = '') {
+  const t = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement('span');
+  if (cls) line.className = cls;
+  line.textContent = `[${t}] ${msg}\n`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+const post = (p, body) => api(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+
+let st = null, np = null;
+
+function chip(text, cls = '') { return `<span class="chip ${cls}">${text}</span>`; }
+
+function renderStatus() {
+  if (!st) return;
+  const who = st.auth.loggedIn && st.auth.user ? `@${st.auth.user.login}` : 'NOT LOGGED IN';
+  const es = st.eventsub.connected ? 'CHAT LIVE' : (st.eventsub.status || 'idle').toUpperCase();
+  $('#statusChips').innerHTML =
+    chip(who, st.auth.loggedIn ? 'lit' : 'bad') +
+    chip(es, st.eventsub.connected ? 'lit' : (st.eventsub.status === 'error' ? 'bad' : '')) +
+    chip(st.config.chat.songCommandEnabled ? '!SONG ON' : '!SONG OFF', st.config.chat.songCommandEnabled ? 'lit' : '') +
+    chip(st.config.chat.commandsEnabled ? 'MOD CMDS ON' : 'MOD CMDS OFF', st.config.chat.commandsEnabled ? 'lit' : '') +
+    chip(st.config.chat.nowPlayingEnabled ? 'ANNOUNCE ON' : 'ANNOUNCE OFF', st.config.chat.nowPlayingEnabled ? 'lit' : '') +
+    (st.eventsub.lastError ? chip(String(st.eventsub.lastError).toUpperCase().slice(0, 48), 'warn') : '');
+  $('#connBtn').textContent = st.eventsub.connected ? 'DISCONNECT CHAT' : 'CONNECT CHAT';
+}
+
+function fillForm() {
+  if (!st) return;
+  const c = st.config;
+  $('#clientId').value = c.clientId || '';
+  $('#clientSecret').value = '';
+  $('#clientSecret').placeholder = c.hasClientSecret ? '•••••• (saved — leave blank to keep)' : 'paste secret';
+  $('#redirectUrl').value = c.redirectUrl || '';
+  $('#broadcasterUserId').value = c.broadcasterUserId || '';
+  $('#autoConnect').checked = !!c.autoConnect;
+  $('#songCommandEnabled').checked = !!c.chat.songCommandEnabled;
+  $('#commandsEnabled').checked = !!c.chat.commandsEnabled;
+  $('#nowPlayingEnabled').checked = !!c.chat.nowPlayingEnabled;
+  $('#nowPlayingTemplate').value = c.chat.nowPlayingTemplate || '';
+  $('#songCommandCooldownSec').value = c.chat.songCommandCooldownSec;
+}
+
+function renderNowPlaying() {
+  const has = np && np.title;
+  $('#npState').textContent = has ? (np.status || '').toUpperCase() : 'NOTHING';
+  $('#npState').className = 'chip ' + (np && np.status === 'playing' ? 'lit' : '');
+  $('#npTrack').innerHTML = `<span class="lab">TRACK:</span> <span class="val">${has ? esc((np.artist ? np.artist + ' - ' : '') + np.title) : '—'}</span>`;
+  const tpl = $('#nowPlayingTemplate').value || 'Now playing: {title} by {artist} {artistUrl}';
+  const preview = has ? tpl
+    .replace('{title}', np.title)
+    .replace('{artist}', np.artist || 'Unknown')
+    .replace('{artistUrl}', np.artistUrl || np.comment || '')
+    .replace('{album}', np.album || '')
+    .replace('{year}', np.year || '')
+    .replace('{file}', np.file || '')
+    .replace('{idx}', typeof np.idx === 'number' && np.idx >= 0 ? String(np.idx + 1) : '?')
+    .replace('{count}', np.count ? String(np.count) : '?')
+    .replace(/\s{2,}/g, ' ').trim() : '—';
+  $('#npPreview').innerHTML = `<span class="lab">!SONG PREVIEW:</span> ${esc(preview)}`;
+}
+function esc(s) { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; }
+
+async function refresh(showErrors = false) {
+  try {
+    st = await api('/api/twitch/status');
+    renderStatus();
+  } catch (err) { if (showErrors) toast('STATUS: ' + err.message, true); }
+  try {
+    np = await api('/api/nowplaying');
+    renderNowPlaying();
+  } catch { /* ignore */ }
+}
+
+$('#saveBtn').addEventListener('click', async () => {
+  try {
+    await post('/api/twitch/config', {
+      clientId: $('#clientId').value,
+      clientSecret: $('#clientSecret').value,
+      redirectUrl: $('#redirectUrl').value,
+      broadcasterUserId: $('#broadcasterUserId').value,
+      autoConnect: $('#autoConnect').checked,
+      chat: {
+        songCommandEnabled: $('#songCommandEnabled').checked,
+        commandsEnabled: $('#commandsEnabled').checked,
+        nowPlayingEnabled: $('#nowPlayingEnabled').checked,
+        nowPlayingTemplate: $('#nowPlayingTemplate').value,
+        songCommandCooldownSec: Number($('#songCommandCooldownSec').value)
+      }
+    });
+    toast('CONFIG SAVED');
+    log('config saved', 'ok');
+    refresh();
+  } catch (err) { toast('SAVE FAILED: ' + err.message, true); log('save failed: ' + err.message, 'err'); }
+});
+$('#reloadBtn').addEventListener('click', async () => { await refresh(true); fillForm(); toast('RELOADED'); });
+$('#loginBtn').addEventListener('click', () => {
+  window.open('/api/twitch/login', '_blank');
+  log('login opened in new tab — finish there, then RELOAD', 'ok');
+});
+$('#connBtn').addEventListener('click', async () => {
+  try {
+    await post(st && st.eventsub.connected ? '/api/twitch/disconnect' : '/api/twitch/connect');
+    log(st && st.eventsub.connected ? 'chat disconnected' : 'chat connecting…', 'ok');
+    setTimeout(refresh, 800);
+  } catch (err) { toast(err.message, true); log('connect: ' + err.message, 'err'); }
+});
+
+async function simulate(text, badges) {
+  try {
+    const r = await post('/api/twitch/simulate', { text, badges });
+    const res = r.result || {};
+    if (res.message) log(`${text} → "${res.message}" ${res.sent ? '(sent to chat)' : res.error ? '(NOT sent: ' + res.error + ')' : ''}`, res.sent ? 'ok' : '');
+    else if (res.sent) log(`${text} → command broadcast to players`, 'ok');
+    else log(`${text} → skipped: ${res.skipped || JSON.stringify(res)}`);
+  } catch (err) { log(`${text} → ${err.message}`, 'err'); }
+}
+$('#simSong').addEventListener('click', () => simulate('!song'));
+$('#simNext').addEventListener('click', () => simulate('!next', ['moderator']));
+$('#simPause').addEventListener('click', () => simulate('!pause', ['moderator']));
+$('#sendBtn').addEventListener('click', async () => {
+  const message = $('#sendLine').value.trim();
+  if (!message) return;
+  try { await post('/api/twitch/chat/send', { message }); log(`sent: "${message}"`, 'ok'); toast('SENT'); }
+  catch (err) { log('send failed: ' + err.message, 'err'); toast(err.message, true); }
+});
+$('#nowPlayingTemplate').addEventListener('input', renderNowPlaying);
+
+(async () => {
+  await refresh(true);
+  fillForm();
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>

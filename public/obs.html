@@ -1,0 +1,1424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEONAMP BROADCAST</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Rajdhani:wght@600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  /* ── NEONAMP broadcast overlay ──
+     Jukebox by default (plays the queue, outputs audio for OBS
+     to capture). ?mirror=1 reflects the main player instead.
+     Anchors bottom-right of the browser source by default. */
+  :root {
+    --void:  #0d0820;
+    --panel: rgba(13, 8, 32, .86);
+    --inset: rgba(6, 3, 18, .92);
+    --line:  #2b2350;
+    --line2: #43377c;
+    --cyan:  #21e6c1;
+    --mag:   #ff4f9a;
+    --amber: #ffb24d;
+    --dim:   #6f6d99;
+    --ink:   #eae6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body {
+    display: flex;
+    justify-content: flex-end;   /* right of the screen, per spec */
+    align-items: flex-end;
+    padding: 10px;
+  }
+  body.h-left   { justify-content: flex-start; }
+  body.h-center { justify-content: center; }
+  body.v-top    { align-items: flex-start; }
+  body.v-middle { align-items: center; }
+
+  .amp {
+    width: var(--w, 320px);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: 0 0 26px rgba(33, 230, 193, .12), inset 0 0 30px rgba(0, 0, 0, .55);
+    backdrop-filter: blur(3px);
+    position: relative;
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity .6s ease, transform .6s ease;
+  }
+  .amp.off { opacity: 0; transform: translateY(14px); }
+  .amp.clickable { cursor: pointer; }
+  .amp::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    pointer-events: none;
+    z-index: 2;
+    background:
+      linear-gradient(var(--cyan), var(--cyan)) top left / 12px 1px,
+      linear-gradient(var(--cyan), var(--cyan)) top left / 1px 12px,
+      linear-gradient(var(--mag), var(--mag)) bottom right / 12px 1px,
+      linear-gradient(var(--mag), var(--mag)) bottom right / 1px 12px;
+    background-repeat: no-repeat;
+  }
+
+  /* ── titlebar ── */
+  .titlebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 9px;
+    background: linear-gradient(180deg, rgba(43, 35, 80, .55), rgba(13, 8, 32, .2));
+    border-bottom: 1px solid var(--line);
+  }
+  .logo {
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 900;
+    font-size: 12px;
+    letter-spacing: 2.5px;
+    color: var(--cyan);
+    text-shadow: 0 0 7px rgba(33, 230, 193, .8);
+  }
+  .logo em { font-style: normal; color: var(--mag); text-shadow: 0 0 7px rgba(255, 79, 154, .8); }
+  .tag {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 600;
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .spacer { flex: 1; }
+  .winbtns { display: flex; gap: 4px; }
+  .winbtns i { width: 7px; height: 7px; border: 1px solid; border-radius: 50%; display: block; }
+  .winbtns i:nth-child(1) { border-color: var(--cyan); }
+  .winbtns i:nth-child(2) { border-color: var(--amber); }
+  .winbtns i:nth-child(3) { border-color: var(--mag); }
+
+  /* ── LCD blocks (scanlines like the big deck) ── */
+  .lcd {
+    background: var(--inset);
+    border: 1px solid var(--line);
+    position: relative;
+    overflow: hidden;
+  }
+  .lcd::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,.028) 0 1px, transparent 1px 3px);
+  }
+
+  .body { padding: 8px; display: grid; gap: 7px; }
+
+  /* ── display row: art + time + vis ── */
+  .display {
+    display: flex;
+    gap: 8px;
+    padding: 7px 8px;
+    align-items: stretch;
+  }
+  .art {
+    flex: 0 0 auto;
+    width: 52px;
+    height: 52px;
+    object-fit: cover;
+    border: 1px solid var(--line);
+    box-shadow: 0 0 8px rgba(33, 230, 193, .18);
+    align-self: center;
+  }
+  .art.hidden { display: none; }
+  .lcd-left { display: flex; flex-direction: column; justify-content: center; min-width: 76px; }
+  .time {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 24px;
+    line-height: 1;
+    color: var(--cyan);
+    text-shadow: 0 0 9px rgba(33, 230, 193, .65);
+  }
+  .playstate {
+    margin-top: 4px;
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--dim);
+  }
+  .playstate.on { color: var(--mag); text-shadow: 0 0 6px rgba(255, 79, 154, .8); }
+  canvas.vis { flex: 1; min-width: 0; height: 52px; align-self: center; }
+  body.novis canvas.vis { display: none; }
+
+  /* ── marquee trackline ── */
+  .trackline { padding: 6px 8px; }
+  .mq {
+    overflow: hidden;
+    white-space: nowrap;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 1px;
+    color: var(--ink);
+    text-shadow: 0 0 7px rgba(33, 230, 193, .35);
+  }
+  .mq span { display: inline-block; will-change: transform; }
+  .mq.scrolling span { animation: marq var(--marq-dur, 12s) linear infinite; }
+  @keyframes marq {
+    from { transform: translateX(0); }
+    to   { transform: translateX(calc(-1 * var(--marq-w, 300px))); }
+  }
+
+  /* ── progress ── */
+  .prog {
+    height: 7px;
+    background: var(--inset);
+    border: 1px solid var(--line);
+    position: relative;
+  }
+  .prog i {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 0%;
+    background: linear-gradient(90deg, var(--cyan), var(--mag));
+    box-shadow: 0 0 8px rgba(33, 230, 193, .5);
+    transition: width .25s linear;
+  }
+
+  /* ── chips row ── */
+  .metarow { display: flex; gap: 6px; align-items: center; }
+  .chip {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: var(--dim);
+    padding: 3px 6px;
+  }
+  .chip.lit { color: var(--cyan); text-shadow: 0 0 5px rgba(33, 230, 193, .5); }
+  .chip.trk { color: var(--amber); }
+
+  /* ── statusbar ── */
+  .statusbar {
+    padding: 4px 9px;
+    border-top: 1px solid var(--line);
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 600;
+    font-size: 8.5px;
+    letter-spacing: 2px;
+    color: var(--dim);
+    text-transform: uppercase;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mq.scrolling span { animation: none; }
+  }
+</style>
+<style>
+  /* Broadcast HUD rework — compact at rest, readable at stream scale. */
+  body { justify-content: flex-end; align-items: flex-end; padding: 10px; }
+  .amp {
+    width: var(--w, 320px);
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--cyan) 32%, var(--line));
+    border-radius: 12px;
+    background:
+      radial-gradient(circle at 14% 0%, color-mix(in srgb, var(--cyan) 10%, transparent), transparent 42%),
+      linear-gradient(145deg, rgba(18, 13, 40, .96), rgba(7, 4, 20, .93));
+    box-shadow:
+      0 14px 38px rgba(0, 0, 0, .56),
+      0 0 24px color-mix(in srgb, var(--cyan) 13%, transparent),
+      inset 0 1px rgba(255, 255, 255, .055);
+    backdrop-filter: blur(12px) saturate(1.25);
+  }
+  .amp.off { transform: translateY(18px) scale(.985); }
+  body.demo .amp { transition: none; }
+  .amp::before {
+    inset: 0;
+    z-index: 4;
+    background: linear-gradient(90deg, var(--cyan), var(--mag), transparent 88%) top left / 100% 2px no-repeat;
+  }
+  .amp::after {
+    content: '';
+    position: absolute;
+    width: 150px;
+    height: 150px;
+    right: -65px;
+    bottom: -90px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--mag) 12%, transparent);
+    filter: blur(28px);
+    pointer-events: none;
+  }
+  .titlebar {
+    min-height: 36px;
+    padding: 7px 10px 6px;
+    gap: 7px;
+    border-bottom: 1px solid rgba(255, 255, 255, .065);
+    background: rgba(255, 255, 255, .018);
+  }
+  .brandblock { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+  .logo { font-size: 11px; letter-spacing: 2.3px; }
+  .tag { font-size: 6.5px; letter-spacing: 1.3px; }
+  .livebadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 6px;
+    border: 1px solid color-mix(in srgb, var(--cyan) 26%, var(--line));
+    border-radius: 999px;
+    color: var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 7%, transparent);
+    font: 700 7px/1 'Rajdhani', sans-serif;
+    letter-spacing: 1.1px;
+  }
+  .livebadge i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 8px var(--cyan);
+    animation: signalPulse 1.8s ease-in-out infinite;
+  }
+  .amp[data-state="paused"] .livebadge { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 28%, var(--line)); }
+  .amp[data-state="paused"] .livebadge i { background: var(--amber); box-shadow: 0 0 8px var(--amber); animation: none; }
+  .amp[data-state="stopped"] .livebadge { color: var(--dim); border-color: var(--line); background: transparent; }
+  .amp[data-state="stopped"] .livebadge i { background: var(--dim); box-shadow: none; animation: none; }
+  @keyframes signalPulse { 50% { opacity: .35; transform: scale(.72); } }
+
+  .hudbody { display: grid; gap: 7px; padding: 9px 10px 8px; }
+  .nowrow { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 9px; align-items: center; }
+  .artframe {
+    position: relative;
+    width: 62px;
+    height: 62px;
+    overflow: hidden;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--cyan) 25%, var(--line));
+    background:
+      linear-gradient(135deg, color-mix(in srgb, var(--cyan) 9%, transparent), transparent 55%),
+      var(--inset);
+    box-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 10%, transparent), inset 0 0 18px rgba(0, 0, 0, .4);
+  }
+  .artframe::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(145deg, rgba(255,255,255,.08), transparent 38%, rgba(0,0,0,.16));
+    pointer-events: none;
+  }
+  .noart {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--line2);
+    font: 900 14px/1 'Orbitron', sans-serif;
+    letter-spacing: 2px;
+  }
+  .art { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 7px; box-shadow: none; z-index: 1; transition: opacity .25s ease; }
+  .art.hidden { display: block; opacity: 0; }
+  .nowcopy { min-width: 0; display: grid; gap: 4px; }
+  .overline { display: flex; align-items: center; gap: 6px; color: var(--dim); font: 700 6.5px/1 'Rajdhani', sans-serif; letter-spacing: 1.4px; }
+  .overline::before { content: ''; width: 13px; height: 1px; background: var(--mag); box-shadow: 0 0 6px var(--mag); }
+  .playstate { margin: 0 0 0 auto; font-size: 6.5px; letter-spacing: 1px; }
+  .songline { min-width: 0; padding: 1px 0; color: var(--ink); font: 700 15px/1.1 'Rajdhani', sans-serif; letter-spacing: .3px; text-shadow: 0 0 10px color-mix(in srgb, var(--cyan) 22%, transparent); }
+  .artistline { overflow: hidden; color: var(--cyan); font: 600 9px/1.1 'Rajdhani', sans-serif; letter-spacing: .9px; text-overflow: ellipsis; white-space: nowrap; }
+  .timeline { display: grid; grid-template-columns: auto minmax(35px, 1fr) auto; align-items: center; gap: 6px; margin-top: 1px; }
+  .time { font-size: 15px; }
+  .duration { color: var(--dim); font: 8px/1 'Share Tech Mono', monospace; }
+  .prog { height: 3px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; }
+  .prog i { border-radius: inherit; background: linear-gradient(90deg, var(--cyan), var(--mag)); }
+
+  .vispanel {
+    position: relative;
+    overflow: hidden;
+    height: 60px;
+    padding: 17px 6px 5px;
+    border: 1px solid rgba(255, 255, 255, .07);
+    border-radius: 8px;
+    background: linear-gradient(180deg, rgba(0,0,0,.34), rgba(0,0,0,.56));
+  }
+  .vispanel::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    opacity: .18;
+    background-image: linear-gradient(rgba(255,255,255,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px);
+    background-size: 18px 18px;
+    pointer-events: none;
+  }
+  .vishead { position: absolute; z-index: 2; inset: 5px 7px auto; display: flex; justify-content: space-between; color: var(--dim); font: 700 6.5px/1 'Rajdhani', sans-serif; letter-spacing: 1.2px; }
+  .vishead span:last-child { color: var(--mag); }
+  canvas.vis { position: relative; z-index: 1; display: block; width: 100%; height: 38px; }
+  body.novis .vispanel { display: none; }
+
+  .metarow { gap: 4px; }
+  .chip { padding: 3px 5px; border: 1px solid rgba(255,255,255,.065); border-radius: 4px; background: rgba(0,0,0,.24); font-size: 7px; }
+  .statusbar { display: flex; align-items: center; gap: 6px; min-height: 22px; padding: 5px 10px; border-top-color: rgba(255,255,255,.06); background: rgba(0,0,0,.2); font-size: 6.5px; }
+  .statusbar::before { content: ''; width: 14px; height: 1px; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+  .statusbar .right { margin-left: auto; color: color-mix(in srgb, var(--mag) 70%, var(--dim)); }
+
+  @media (max-width: 340px) {
+    body { padding: 6px; }
+    .amp { --w: calc(100vw - 12px); }
+  }
+  @media (prefers-reduced-motion: reduce) { .livebadge i { animation: none; } }
+</style>
+</head>
+<body>
+
+<div class="amp off" id="amp">
+  <header class="titlebar">
+    <div class="brandblock">
+      <span class="logo">NEON<em>AMP</em></span>
+      <span class="tag">broadcast deck</span>
+    </div>
+    <span class="spacer"></span>
+    <span class="livebadge"><i></i><span id="sourceTag">JUKEBOX LIVE</span></span>
+  </header>
+
+  <div class="hudbody">
+    <section class="nowrow">
+      <div class="artframe">
+        <span class="noart">NA</span>
+        <img class="art hidden" id="art" alt="" draggable="false">
+      </div>
+      <div class="nowcopy">
+        <div class="overline"><span>NOW PLAYING</span><span class="playstate" id="playstate">■ STOPPED</span></div>
+        <div class="mq songline" id="mq"><span id="title">WAITING FOR SIGNAL…</span></div>
+        <div class="artistline" id="artist">NEONAMP BROADCAST AUDIO</div>
+        <div class="timeline">
+          <span class="time" id="time">00:00</span>
+          <div class="prog" id="prog"><i id="progFill"></i></div>
+          <span class="duration" id="duration">--:--</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="vispanel">
+      <div class="vishead"><span>AUDIO SIGNAL</span><span id="visName">SPECTRUM BARS</span></div>
+      <canvas class="vis" id="vis"></canvas>
+    </section>
+
+    <div class="metarow">
+      <span class="chip lcd" id="kbps">--- KBPS</span>
+      <span class="chip lcd" id="khz">-- KHZ</span>
+      <span class="spacer"></span>
+      <span class="chip lcd trk" id="trk">TRK --/--</span>
+    </div>
+  </div>
+
+  <footer class="statusbar"><span>INSERT3COINS // BROADCAST OUTPUT</span><span class="right">NEONAMP</span></footer>
+</div>
+
+<script>
+'use strict';
+// ── params ──────────────────────────────────────────────
+const P = new URLSearchParams(location.search);
+const DEMO   = P.has('demo');
+const KEEP   = P.has('keep');
+const NOVIS  = P.has('novis');
+const MIRROR = P.has('mirror');                    // follow the main player instead
+const PLAYLIST = P.get('playlist');                // named playlist to play
+const PLAYMODE = !DEMO && !MIRROR;                 // default: the overlay IS the jukebox
+const SHUFFLE_PIN = P.has('shuffle');
+let shuffleOn = SHUFFLE_PIN;
+const VOLP   = P.get('vol');
+const EQPIN  = P.has('eq');   // URL pin forces EQ routing regardless of settings
+let eqRouting = EQPIN;        // may also come from settings.obsEq at boot
+let obsEqOn = true;           // deck's OBS toggle — false flattens the filters live
+const VISREQ = (P.get('vis') || 'bars').toLowerCase();
+const WIDTH  = Number(P.get('max') || P.get('w'));
+const ALIGN  = P.get('align');                     // left | center | right (default right)
+const VALIGN = P.get('valign');                    // top | middle | bottom (default bottom)
+
+const THEMEP = (P.get('theme') || '').toUpperCase();
+const VIS_PIN = P.has('vis');
+let visMode = ['bars', 'scope', 'vu', 'radial', 'waterfall', 'dots', 'particles', 'off'].includes(VISREQ) ? VISREQ : 'bars';
+const VIS_LABELS = {
+  bars: 'SPECTRUM BARS', scope: 'OSCILLOSCOPE', vu: 'VU METER', radial: 'RADIAL CORE',
+  waterfall: 'WATERFALL', dots: 'DOT MATRIX', particles: 'PARTICLE BURST', off: 'VISUALIZER OFF'
+};
+
+// theme palettes (mirror of the deck's engine)
+const THEMES = {
+  'NEON':       { vars: {}, vis: { c1: '#21e6c1', c2: '#7a5cff', c3: '#ff4f9a', peak: '#ffb24d' } },
+  'C64':        { vars: { '--panel':'rgba(22,16,64,.86)','--inset':'rgba(10,7,34,.92)','--line':'#2f2670','--cyan':'#8f9dff','--mag':'#c77dff','--amber':'#ffe08a','--dim':'#7a76b8','--ink':'#dcdcff' }, vis: { c1:'#8f9dff', c2:'#a58bff', c3:'#c77dff', peak:'#ffe08a' } },
+  'AMBER TERM': { vars: { '--panel':'rgba(22,12,0,.86)','--inset':'rgba(10,5,0,.92)','--line':'#4a2c05','--cyan':'#ffb000','--mag':'#ff7a00','--amber':'#ffd75e','--dim':'#8a5a20','--ink':'#ffd9a0' }, vis: { c1:'#ffb000', c2:'#ff9020', c3:'#ff7a00', peak:'#ffd75e' } },
+  'VAPORWAVE':  { vars: { '--panel':'rgba(34,21,66,.86)','--inset':'rgba(18,11,36,.92)','--line':'#41306b','--cyan':'#7af3e0','--mag':'#ff9de2','--amber':'#ffd9a8','--dim':'#8d84b8','--ink':'#f4ecff' }, vis: { c1:'#7af3e0', c2:'#b3a1ff', c3:'#ff9de2', peak:'#ffd9a8' } },
+  'GREEN PHOS': { vars: { '--panel':'rgba(4,20,10,.86)','--inset':'rgba(1,8,3,.92)','--line':'#0e3a20','--cyan':'#33ff77','--mag':'#9dffb0','--amber':'#d6ff5e','--dim':'#3f7a54','--ink':'#bdf7cf' }, vis: { c1:'#33ff77', c2:'#6fff9a', c3:'#9dffb0', peak:'#d6ff5e' } }
+};
+let VIS_COLORS = THEMES.NEON.vis;
+function applyTheme(name) {
+  const t = THEMES[name] || THEMES.NEON;
+  for (const th of Object.values(THEMES)) for (const k of Object.keys(th.vars)) document.documentElement.style.removeProperty(k);
+  for (const [k, v] of Object.entries(t.vars)) document.documentElement.style.setProperty(k, v);
+  VIS_COLORS = t.vis;
+  sizeVis();
+}
+if (ALIGN === 'left' || ALIGN === 'center') document.body.classList.add('h-' + ALIGN);
+if (VALIGN === 'top' || VALIGN === 'middle') document.body.classList.add('v-' + VALIGN);
+if (DEMO) document.body.classList.add('demo');
+if (NOVIS || visMode === 'off') document.body.classList.add('novis');
+if (WIDTH > 220) document.documentElement.style.setProperty('--w', `${WIDTH}px`);
+
+const $ = (s) => document.querySelector(s);
+const amp = $('#amp'), timeEl = $('#time'), stateEl = $('#playstate'),
+      durationEl = $('#duration'), artistEl = $('#artist'), sourceTagEl = $('#sourceTag'),
+      visNameEl = $('#visName'), mq = $('#mq'), titleEl = $('#title'), artEl = $('#art'),
+      kbpsEl = $('#kbps'), khzEl = $('#khz'), trkEl = $('#trk'),
+      progFill = $('#progFill');
+sourceTagEl.textContent = DEMO ? 'DEMO SIGNAL' : MIRROR ? 'DECK MIRROR' : PLAYLIST ? 'PLAYLIST LIVE' : 'JUKEBOX LIVE';
+visNameEl.textContent = VIS_LABELS[visMode];
+
+// ── state ───────────────────────────────────────────────
+let state = null;
+let lastMsgAt = 0;
+let lastFftAt = 0;
+let stoppedAt = 0;
+const BARS = 24, WAVE = 48;
+const tgt   = new Float32Array(BARS);
+const disp  = new Float32Array(BARS);
+const peaks = new Float32Array(BARS);
+const synth = new Float32Array(BARS).fill(.2);
+const wave  = new Float32Array(WAVE).fill(.5);
+let waterfallRows = [], waterfallAt = 0, particles = [], vuLevel = 0, vuPeak = 0;
+
+// ── art ─────────────────────────────────────────────────
+artEl.addEventListener('load', () => artEl.classList.remove('hidden'));
+artEl.addEventListener('error', () => artEl.classList.add('hidden'));
+function trackKey(t) {
+  if (!t) return '';
+  return t.trackKey || `${t.storage || 'library'}:${t.playlist || ''}:${t.file || ''}`;
+}
+function mediaApiUrl(endpoint, t) {
+  const q = new URLSearchParams({
+    file: t.file,
+    storage: t.storage === 'playlist' ? 'playlist' : t.storage === 'path' ? 'path' : 'library'
+  });
+  if (t.storage === 'playlist' && t.playlist) q.set('playlist', t.playlist);
+  if (t.storage === 'path' && t.sourceId) q.set('source', t.sourceId);
+  return `/api/${endpoint}?${q}`;
+}
+function setArt(track) {
+  if (!track?.file || track.storage === 'radio') { artEl.classList.add('hidden'); artEl.removeAttribute('src'); return; }
+  artEl.src = mediaApiUrl('art', track);
+}
+
+// ── deck rendering ──────────────────────────────────────
+const STATE_TXT = { playing: '▶ PLAYING', paused: '❚❚ PAUSED', stopped: '■ STOPPED' };
+
+function applyState(s) {
+  const trackChanged = !state || trackKey(state) !== trackKey(s) || state.title !== s.title;
+  state = s;
+  amp.dataset.state = s.status || 'stopped';
+  if (s.status === 'stopped') { if (!stoppedAt) stoppedAt = Date.now(); }
+  else stoppedAt = 0;
+
+  stateEl.textContent = STATE_TXT[s.status] || '■ STOPPED';
+  stateEl.classList.toggle('on', s.status === 'playing');
+
+  kbpsEl.textContent = s.bitrate ? `${s.bitrate} KBPS` : '--- KBPS';
+  khzEl.textContent = s.sampleRate ? `${Math.round(s.sampleRate / 1000)} KHZ` : '-- KHZ';
+  kbpsEl.classList.toggle('lit', !!s.bitrate);
+  khzEl.classList.toggle('lit', !!s.sampleRate);
+  trkEl.textContent = (typeof s.idx === 'number' && s.idx >= 0 && s.count)
+    ? `TRK ${String(s.idx + 1).padStart(2, '0')}/${String(s.count).padStart(2, '0')}`
+    : 'TRK --/--';
+  durationEl.textContent = s.duration ? fmtClock(s.duration) : '--:--';
+  artistEl.textContent = (s.artist || s.station || 'NEONAMP BROADCAST AUDIO').toUpperCase();
+
+  if (trackChanged) {
+    const label = s.title || (s.status === 'stopped' ? 'NEONAMP' : 'UNKNOWN TRACK');
+    setTitle(label.toUpperCase());
+    setArt(s);
+  }
+}
+
+function setTitle(text) {
+  mq.classList.remove('scrolling');
+  titleEl.style.removeProperty('--marq-w');
+  titleEl.textContent = text;
+  requestAnimationFrame(() => {
+    if (titleEl.scrollWidth > mq.clientWidth) {
+      const sep = '  ▞▞  ';
+      titleEl.textContent = text + sep + text + sep;
+      const half = titleEl.scrollWidth / 2;
+      titleEl.style.setProperty('--marq-w', `${half}px`);
+      titleEl.style.setProperty('--marq-dur', `${Math.max(7, half / 40)}s`);
+      mq.classList.add('scrolling');
+    }
+  });
+}
+
+function fmtClock(s) {
+  s = Math.max(0, Math.round(s));
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+function elapsed() {
+  if (!state) return 0;
+  let t = state.t || 0;
+  if (PLAYMODE && audio) t = audio.currentTime || 0;
+  else if (state.status === 'playing') t += (Date.now() - state.ts) / 1000;
+  return state.duration ? Math.min(t, state.duration) : t;
+}
+
+// ── visualizer ──────────────────────────────────────────
+const vis = $('#vis');
+const g = vis.getContext('2d');
+let vw = 0, vh = 0, grad = null;
+
+function sizeVis() {
+  const dpr = window.devicePixelRatio || 1;
+  vw = vis.clientWidth; vh = vis.clientHeight;
+  vis.width = Math.max(1, Math.round(vw * dpr));
+  vis.height = Math.max(1, Math.round(vh * dpr));
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  grad = g.createLinearGradient(0, vh, 0, 0);
+  grad.addColorStop(0, VIS_COLORS.c1);
+  grad.addColorStop(.6, VIS_COLORS.c2);
+  grad.addColorStop(1, VIS_COLORS.c3);
+}
+window.addEventListener('resize', sizeVis);
+
+function synthStep(now) {
+  for (let i = 0; i < BARS; i++) {
+    const sweep = .28 + .22 * Math.sin(now / 640 + i * .55);
+    synth[i] = Math.max(.06, Math.min(.85, synth[i] + (Math.random() - .5) * .16));
+    tgt[i] = synth[i] * .6 + sweep * .4;
+  }
+  for (let i = 0; i < WAVE; i++) {
+    wave[i] = .5 + .18 * Math.sin(now / 240 + i * .5) * Math.sin(now / 900);
+  }
+}
+
+function drawBars(playing) {
+  const gap = 2;
+  const bw = Math.max(2, (vw - gap * (BARS - 1)) / BARS);
+  for (let i = 0; i < BARS; i++) {
+    const h = Math.max(1, disp[i] * (vh - 5));
+    const x = i * (bw + gap);
+    g.globalAlpha = playing ? .95 : .18;
+    g.fillStyle = grad;
+    g.fillRect(x, vh - h, bw, h);
+    peaks[i] = Math.max(peaks[i] - .8, h);
+    g.globalAlpha = 1;
+    g.fillStyle = VIS_COLORS.peak;
+    g.fillRect(x, vh - peaks[i] - 2, bw, 2);
+  }
+}
+
+function drawScope(playing) {
+  g.lineWidth = 2;
+  g.strokeStyle = VIS_COLORS.c1;
+  g.globalAlpha = playing ? 1 : .25;
+  g.shadowColor = VIS_COLORS.c1;
+  g.shadowBlur = 5;
+  g.beginPath();
+  for (let i = 0; i < WAVE; i++) {
+    const x = (i / (WAVE - 1)) * vw;
+    const y = wave[i] * (vh - 4) + 2;
+    i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+  }
+  g.stroke();
+  g.shadowBlur = 0;
+  g.globalAlpha = 1;
+}
+
+function drawVU(playing) {
+  let rms = 0;
+  for (let i = 0; i < WAVE; i++) rms += Math.pow((wave[i] - .5) * 2, 2);
+  const target = playing ? Math.min(1, Math.sqrt(rms / WAVE) * 2.3) : 0;
+  vuLevel += (target - vuLevel) * (target > vuLevel ? .5 : .08);
+  vuPeak = Math.max(vuPeak - .007, vuLevel);
+  const count = 20, gap = 3, width = (vw - gap * (count - 1)) / count;
+  const lit = Math.round(vuLevel * count), peak = Math.min(count - 1, Math.round(vuPeak * count));
+  for (let i = 0; i < count; i++) {
+    const frac = i / count;
+    g.fillStyle = frac < .62 ? VIS_COLORS.c1 : frac < .84 ? VIS_COLORS.peak : VIS_COLORS.c3;
+    g.globalAlpha = i < lit ? .95 : .12;
+    g.fillRect(i * (width + gap), vh * .28, width, vh * .44);
+    if (i === peak) { g.globalAlpha = 1; g.fillRect(i * (width + gap), vh * .2, width, 2); }
+  }
+  g.globalAlpha = 1;
+}
+
+function drawRadial(playing) {
+  const cx = vw / 2, cy = vh / 2, base = Math.min(15, vh * .19);
+  const bass = (disp[0] + disp[1] + disp[2]) / 3;
+  g.save(); g.translate(cx, cy);
+  for (let i = 0; i < BARS; i++) {
+    const angle = i / BARS * Math.PI * 2 - Math.PI / 2;
+    const inner = base + bass * 3, outer = inner + 2 + disp[i] * Math.min(22, vh * .3);
+    g.strokeStyle = i % 3 ? VIS_COLORS.c1 : VIS_COLORS.c3;
+    g.globalAlpha = playing ? .4 + disp[i] * .6 : .13;
+    g.beginPath(); g.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner); g.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer); g.stroke();
+  }
+  g.fillStyle = VIS_COLORS.peak; g.globalAlpha = .2 + bass * .7;
+  g.beginPath(); g.arc(0, 0, 3 + bass * 7, 0, Math.PI * 2); g.fill(); g.restore();
+}
+
+function drawWaterfall() {
+  const now = performance.now();
+  if (now - waterfallAt > 55) {
+    waterfallRows.unshift(Float32Array.from(disp));
+    waterfallRows = waterfallRows.slice(0, 16); waterfallAt = now;
+  }
+  const cw = vw / BARS, rh = vh / 16;
+  waterfallRows.forEach((row, y) => row.forEach((value, x) => {
+    g.fillStyle = value > .72 ? VIS_COLORS.peak : value > .38 ? VIS_COLORS.c3 : VIS_COLORS.c1;
+    g.globalAlpha = Math.max(.04, value * (1 - y / 21));
+    g.fillRect(x * cw, y * rh, Math.ceil(cw), Math.ceil(rh));
+  }));
+  g.globalAlpha = 1;
+}
+
+function drawDots(playing) {
+  const rows = 8, gap = 2, dotW = (vw - gap * (BARS - 1)) / BARS, dotH = (vh - gap * (rows - 1)) / rows;
+  for (let x = 0; x < BARS; x++) {
+    const lit = Math.round(disp[x] * rows);
+    for (let y = 0; y < rows; y++) {
+      const fromBottom = rows - y, frac = fromBottom / rows;
+      g.fillStyle = frac > .75 ? VIS_COLORS.c3 : frac > .5 ? VIS_COLORS.peak : VIS_COLORS.c1;
+      g.globalAlpha = playing && fromBottom <= lit ? .95 : .09;
+      g.fillRect(x * (dotW + gap), y * (dotH + gap), dotW, dotH);
+    }
+  }
+  g.globalAlpha = 1;
+}
+
+function drawParticles(playing) {
+  const bass = (disp[0] + disp[1] + disp[2] + disp[3]) / 4, cx = vw / 2, cy = vh / 2;
+  if (playing && bass > .12 && particles.length < 80) {
+    for (let i = 0; i < 1 + Math.floor(bass * 3); i++) {
+      const angle = Math.random() * Math.PI * 2, speed = .3 + bass * 1.8 + Math.random() * .5;
+      particles.push({ x: cx, y: cy, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life: 1, color: Math.random() > .5 ? VIS_COLORS.c1 : VIS_COLORS.c3 });
+    }
+  }
+  particles = particles.filter((p) => {
+    p.x += p.vx; p.y += p.vy; p.life -= .015;
+    if (p.life <= 0 || p.x < 0 || p.x > vw || p.y < 0 || p.y > vh) return false;
+    g.fillStyle = p.color; g.globalAlpha = p.life; g.fillRect(p.x, p.y, 2, 2); return true;
+  });
+  g.globalAlpha = 1;
+}
+
+// ── main loop ───────────────────────────────────────────
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (DEMO) demoTick(now);
+
+  const playing = !!(state && state.status === 'playing');
+
+  if (PLAYMODE && analyser) {
+    sampleLocalAudio();
+  } else if (playing && !DEMO && Date.now() - lastFftAt > 1500) {
+    synthStep(now);
+  }
+  if (!playing && !DEMO) tgt.fill(0);
+  for (let i = 0; i < BARS; i++) disp[i] += (tgt[i] - disp[i]) * .35;
+
+  g.clearRect(0, 0, vw, vh);
+  if (visMode === 'scope') drawScope(playing || DEMO);
+  else if (visMode === 'vu') drawVU(playing || DEMO);
+  else if (visMode === 'radial') drawRadial(playing || DEMO);
+  else if (visMode === 'waterfall') drawWaterfall();
+  else if (visMode === 'dots') drawDots(playing || DEMO);
+  else if (visMode === 'particles') drawParticles(playing || DEMO);
+  else if (visMode !== 'off') drawBars(playing || DEMO);
+
+  if (state) {
+    const e = elapsed();
+    timeEl.textContent = fmtClock(e);
+    durationEl.textContent = state.duration ? fmtClock(state.duration) : '--:--';
+    progFill.style.width = state.duration ? `${Math.min(100, (e / state.duration) * 100)}%` : '0%';
+  }
+
+  const now2 = Date.now();
+  if (PLAYMODE || KEEP || DEMO) {
+    amp.classList.remove('off');
+  } else {
+    const stale = !lastMsgAt ? (now2 - bootAt > 8000) : (now2 - lastMsgAt > 12000);
+    const longStopped = stoppedAt && now2 - stoppedAt > 4000;
+    amp.classList.toggle('off', stale || longStopped);
+  }
+}
+
+// ── mirror mode: follow the main player over /ws ────────
+function connect() {
+  let ws;
+  try {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
+  } catch { setTimeout(connect, 3000); return; }
+  ws.addEventListener('message', (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    lastMsgAt = Date.now();
+    if (msg.type === 'theme' && !THEMEP && THEMES[msg.name]) { applyTheme(msg.name); return; }
+    if (msg.type === 'cmd' && msg.cmd === 'apply-settings') { applyRemoteObsSettings(msg.settings); return; }
+    if (msg.type === 'cmd' && msg.cmd === 'rename-playlist') { renameObsPlaylist(msg); return; }
+    if (msg.type === 'state') applyState(msg);
+    else if (msg.type === 'fft') {
+      lastFftAt = Date.now();
+      if (Array.isArray(msg.b)) for (let i = 0; i < BARS; i++) tgt[i] = (msg.b[i] || 0) / 255;
+      if (Array.isArray(msg.w)) for (let i = 0; i < WAVE; i++) wave[i] = (msg.w[i] ?? 128) / 255;
+    }
+  });
+  ws.addEventListener('close', () => setTimeout(connect, 3000));
+  ws.addEventListener('error', () => { try { ws.close(); } catch {} });
+}
+
+// ── jukebox mode: the overlay IS the player ─────────────
+let audio = null, actx = null, analyser = null, abuf = null, wbuf = null;
+let capStream = null;
+let queue = [], qi = 0, errStreak = 0, awaitingClick = false;
+let activeQueueName = PLAYLIST || '', queueRetryTimer = null;
+let radioRetry = 0, radioRetryTimer = null, currentRadioTitle = '';
+let jws = null; // jukebox → server state feed (powers !song + mirror overlays)
+let baseVol = 0.8;      // volume-curve result before normalization
+let balanceValue = 0;
+let repeatMode = 'all'; // preserves the jukebox's original endless-play default
+let normalizeOn = true; // follows the deck live over /ws prefs
+let curGain = null;     // current track's loudness gain (dB), when known
+let eqPrefs = { on: true, bands: new Array(10).fill(0) };
+let dspPrefs = [];
+const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
+let eqFilters = [];
+let dspNodes = [];
+let eqSource = null;
+let obsPanner = null;
+let normNode = null, outputLevelMeter = null, outputLevelGain = null, outputSafetyLimiter = null, obsMasterGain = null;
+let outputLevelBuffer = null, outputLevelPower = null, outputLevelTrimDb = 0, outputLevelAt = 0;
+
+const OUTPUT_LEVEL_TARGET_DBFS = -18;
+const OUTPUT_LEVEL_FLOOR_DBFS = -48;
+const OUTPUT_LEVEL_MAX_ATTENUATION_DB = -6;
+
+function resetObsOutputLeveler(resetGain = false) {
+  outputLevelPower = null;
+  outputLevelAt = 0;
+  if (!resetGain) return;
+  outputLevelTrimDb = 0;
+  if (outputLevelGain && actx) {
+    outputLevelGain.gain.cancelScheduledValues(actx.currentTime);
+    outputLevelGain.gain.setValueAtTime(1, actx.currentTime);
+  }
+}
+
+function updateObsOutputLeveler() {
+  if (!actx || !outputLevelMeter || !outputLevelGain) return;
+  if (!normalizeOn || !audio || audio.paused || actx.state !== 'running') {
+    if (!normalizeOn && Math.abs(outputLevelTrimDb) > .02) {
+      outputLevelTrimDb = 0;
+      outputLevelGain.gain.cancelScheduledValues(actx.currentTime);
+      outputLevelGain.gain.setTargetAtTime(1, actx.currentTime, .35);
+    }
+    return;
+  }
+  if (!outputLevelBuffer || outputLevelBuffer.length !== outputLevelMeter.fftSize) {
+    outputLevelBuffer = new Float32Array(outputLevelMeter.fftSize);
+  }
+  outputLevelMeter.getFloatTimeDomainData(outputLevelBuffer);
+  let sum = 0;
+  for (let i = 0; i < outputLevelBuffer.length; i++) sum += outputLevelBuffer[i] * outputLevelBuffer[i];
+  const power = sum / outputLevelBuffer.length;
+  if (!(power > 0)) return;
+  const instantDb = 10 * Math.log10(power);
+  if (instantDb < OUTPUT_LEVEL_FLOOR_DBFS) return;
+
+  const now = performance.now();
+  const elapsed = outputLevelAt ? Math.min(1, (now - outputLevelAt) / 1000) : .2;
+  outputLevelAt = now;
+  const averageAlpha = 1 - Math.exp(-elapsed / 2.5);
+  outputLevelPower = outputLevelPower === null ? power : outputLevelPower + (power - outputLevelPower) * averageAlpha;
+  const averageDb = 10 * Math.log10(Math.max(1e-9, outputLevelPower));
+  let wantedDb = Math.max(OUTPUT_LEVEL_MAX_ATTENUATION_DB, Math.min(0, OUTPUT_LEVEL_TARGET_DBFS - averageDb));
+  if (Math.abs(wantedDb - outputLevelTrimDb) < .2) wantedDb = outputLevelTrimDb;
+  const reducing = wantedDb < outputLevelTrimDb;
+  const responseSeconds = reducing ? .55 : 5;
+  const responseAlpha = 1 - Math.exp(-elapsed / responseSeconds);
+  outputLevelTrimDb += (wantedDb - outputLevelTrimDb) * responseAlpha;
+  outputLevelGain.gain.cancelScheduledValues(actx.currentTime);
+  outputLevelGain.gain.setTargetAtTime(Math.pow(10, outputLevelTrimDb / 20), actx.currentTime, reducing ? .12 : .8);
+}
+
+setInterval(updateObsOutputLeveler, 200);
+
+function applyJukeVolume() {
+  if (!audio) return;
+  const gainDb = normalizeOn && typeof curGain === 'number' ? curGain : 0;
+  if (normNode && obsMasterGain && actx) {
+    // Web Audio provides the headroom needed to raise quiet tracks. The
+    // media element stays at unity and a final master stage applies the
+    // user's volume after normalization, EQ, DSP, leveling and limiting.
+    audio.volume = 1;
+    normNode.gain.setTargetAtTime(Math.pow(10, gainDb / 20), actx.currentTime, .03);
+    obsMasterGain.gain.cancelScheduledValues(actx.currentTime);
+    obsMasterGain.gain.setValueAtTime(Math.max(0, Math.min(1, baseVol)), actx.currentTime);
+    return;
+  }
+  // Reliable media-element fallback for OBS versions that cannot capture
+  // Web Audio. It can attenuate immediately; positive gain triggers the
+  // processed route as soon as the AudioContext is available.
+  const v = baseVol * Math.pow(10, Math.min(0, gainDb) / 20);
+  audio.volume = Math.max(0, Math.min(1, v));
+}
+
+function applyEqPrefs() {
+  if (!eqFilters.length) return;
+  const live = obsEqOn && eqPrefs.on;
+  eqFilters.forEach((f, i) => { f.gain.value = live ? (eqPrefs.bands[i] || 0) : 0; });
+}
+
+function applyPrefs(msg) {
+  if (typeof msg.normalize === 'boolean') normalizeOn = msg.normalize;
+  if (typeof msg.obsEq === 'boolean' && !EQPIN) obsEqOn = msg.obsEq;
+  if (msg.eq && Array.isArray(msg.eq.bands)) {
+    eqPrefs = { on: msg.eq.on !== false, bands: msg.eq.bands.slice(0, 10) };
+  }
+  if (msg.dsp && Array.isArray(msg.dsp.modules)) dspPrefs = msg.dsp.modules.slice(0, 16);
+  applyJukeVolume();
+  const wantsProcessing = EQPIN || obsEqOn || balanceValue !== 0 ||
+    dspPrefs.some((m) => m && m.enabled !== false) ||
+    (normalizeOn && typeof curGain === 'number' && curGain > 0);
+  if (wantsProcessing && audio && !eqSource) {
+    try { if (analyser) analyser.disconnect(); } catch { /* disconnected */ }
+    analyser = null;
+    eqRouting = true;
+    ensureEqGraph();
+  } else if (eqSource) rebuildProcessedGraph();
+  else applyEqPrefs();
+  applyJukeVolume();
+}
+
+function applyRemoteObsSettings(settings) {
+  if (!settings || typeof settings !== 'object') return;
+  if (typeof settings.volume === 'number' && (VOLP === null || VOLP === '')) {
+    baseVol = Math.pow(Math.max(0, Math.min(100, settings.volume)) / 100, 1.6);
+  }
+  if (typeof settings.balance === 'number') balanceValue = Math.max(-100, Math.min(100, settings.balance));
+  if (typeof settings.shuffle === 'boolean' && !SHUFFLE_PIN) shuffleOn = settings.shuffle;
+  if (['off', 'all', 'one'].includes(settings.repeat)) repeatMode = settings.repeat;
+  if (!VIS_PIN && !NOVIS && VIS_LABELS[settings.visMode]) {
+    visMode = settings.visMode;
+    document.body.classList.toggle('novis', visMode === 'off');
+    visNameEl.textContent = VIS_LABELS[visMode];
+    sizeVis();
+  }
+  if (!THEMEP && typeof settings.theme === 'string' && THEMES[settings.theme]) applyTheme(settings.theme);
+  applyPrefs(settings);
+}
+
+function renameObsPlaylist({ from, to }) {
+  if (!from || !to || activeQueueName !== from) return;
+  const savedStatus = state?.status || (audio && !audio.paused ? 'playing' : 'paused');
+  const seekTo = Number(audio?.currentTime) || 0;
+  activeQueueName = to;
+  queue = queue.map((track) => track?.storage === 'playlist' && track.playlist === from ? { ...track, playlist: to } : track);
+  const track = queue[qi];
+  if (audio && track?.storage === 'playlist' && audio.src) {
+    audio.pause();
+    audio.src = trackUrl(track);
+    audio.addEventListener('loadedmetadata', () => {
+      if (seekTo > 0) audio.currentTime = Math.min(seekTo, Math.max(0, (audio.duration || seekTo) - .5));
+      if (savedStatus === 'playing') audio.play().catch(() => {});
+      else localState(savedStatus === 'stopped' ? 'stopped' : 'paused');
+    }, { once: true });
+  } else if (audio) localState(savedStatus);
+}
+
+async function loadPlaylistCommand(msg) {
+  try {
+    const data = await fetch('/api/playlists/' + encodeURIComponent(msg.name || '')).then(async (r) => {
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+      return body;
+    });
+    const nextQueue = Array.isArray(data.tracks) ? data.tracks : [];
+    if (!nextQueue.length) throw new Error('Playlist is empty');
+    activeQueueName = data.name || msg.name || '';
+    const index = Math.max(0, Math.min(nextQueue.length - 1, Number(msg.index) || 0));
+    clearTimeout(queueRetryTimer);
+    if (!audio) {
+      await startPlayer({ tracks: nextQueue, index, play: msg.play !== false, name: activeQueueName });
+      return;
+    }
+    queue = nextQueue;
+    qi = index;
+    currentRadioTitle = '';
+    if (msg.play !== false) playCurrent(0);
+    else {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      localState('stopped', queue[qi]);
+    }
+  } catch (err) {
+    setTitle(`PLAYLIST CONTROL ERROR — ${err.message}`.toUpperCase());
+    amp.classList.remove('off');
+  }
+}
+
+async function fetchJukeGain(t) {
+  curGain = null;
+  resetObsOutputLeveler(false);
+  applyJukeVolume();
+  if (!t || !t.file || t.storage === 'radio') return;
+  try {
+    const r = await fetch(mediaApiUrl('loudness', t)).then((x) => x.json());
+    if (r.status === 'ready' && typeof r.gain === 'number' && queue[qi] && trackKey(queue[qi]) === trackKey(t)) {
+      curGain = r.gain;
+      ensureNormalizationRouting();
+      applyJukeVolume();
+    }
+  } catch { /* unity */ }
+}
+
+function jukeboxWs() {
+  let ws;
+  try {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
+  } catch { setTimeout(jukeboxWs, 4000); return; }
+  ws.addEventListener('open', () => { jws = ws; pushState(); });
+  ws.addEventListener('close', () => { if (jws === ws) jws = null; setTimeout(jukeboxWs, 3000); });
+  ws.addEventListener('error', () => { try { ws.close(); } catch {} });
+  ws.addEventListener('message', (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === 'theme' && !THEMEP && THEMES[msg.name]) { applyTheme(msg.name); return; }
+    if (msg.type === 'prefs') { applyPrefs(msg); return; }
+    if (msg.type === 'radio' && queue[qi]?.storage === 'radio' && (queue[qi].stationId || queue[qi].file) === msg.stationId) {
+      currentRadioTitle = msg.title || '';
+      localState(audio && !audio.paused ? 'playing' : 'paused');
+      return;
+    }
+    if (msg.type === 'loudness' && audio && queue[qi] && trackKey(queue[qi]) === msg.trackKey) {
+      curGain = msg.gain;
+      ensureNormalizationRouting();
+      applyJukeVolume();
+      return;
+    }
+    if (msg.type !== 'cmd') return;   // jukebox is authoritative; ignore state/fft echoes
+    if (msg.cmd === 'apply-settings') { applyRemoteObsSettings(msg.settings); return; }
+    if (msg.cmd === 'rename-playlist') { renameObsPlaylist(msg); return; }
+    if (msg.cmd === 'load-playlist') { loadPlaylistCommand(msg); return; }
+    if (msg.cmd === 'clear-playlist' && (!msg.name || msg.name === activeQueueName)) {
+      if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load(); }
+      queue = [];
+      qi = 0;
+      activeQueueName = '';
+      localState('stopped', {});
+      setTitle('PLAYLIST REMOVED — WAITING FOR CONTROL');
+      return;
+    }
+    if (!audio) return;
+    if (msg.cmd === 'next') next();
+    else if (msg.cmd === 'prev') {
+      if (audio.currentTime > 3) { audio.currentTime = 0; }
+      else { qi = (qi - 1 + queue.length) % queue.length; playCurrent(0); }
+    }
+    else if (msg.cmd === 'pause') { if (!audio.paused) audio.pause(); }
+    else if (msg.cmd === 'resume') { audio.play().catch(() => {}); }
+    else if (msg.cmd === 'stop') { audio.pause(); audio.currentTime = 0; localState('stopped'); }
+  });
+}
+
+function pushState() {
+  if (!jws || jws.readyState !== 1 || !state) return;
+  try { jws.send(JSON.stringify({ ...state, t: audio ? audio.currentTime : state.t, ts: Date.now() })); } catch {}
+}
+setInterval(pushState, 2000);
+
+async function startPlayer(forced = null) {
+  let vol = 80, startIdx = 0, startT = 0;
+  try {
+    const d = await fetch('/api/session').then((r) => r.json());
+    if (typeof d.volume === 'number') vol = d.volume;
+    if (typeof d.balance === 'number') balanceValue = Math.max(-100, Math.min(100, d.balance));
+    if (typeof d.shuffle === 'boolean' && !SHUFFLE_PIN) shuffleOn = d.shuffle;
+    if (['off', 'all', 'one'].includes(d.repeat)) repeatMode = d.repeat;
+    if (typeof d.normalize === 'boolean') normalizeOn = d.normalize;
+    if (typeof d.obsEq === 'boolean' && !EQPIN) { obsEqOn = d.obsEq; eqRouting = eqRouting || d.obsEq; }
+    if (d.eq && Array.isArray(d.eq.bands)) eqPrefs = { on: d.eq.on !== false, bands: d.eq.bands.slice(0, 10) };
+    if (d.dsp && Array.isArray(d.dsp.modules)) {
+      dspPrefs = d.dsp.modules.slice(0, 16);
+      if (dspPrefs.some((m) => m && m.enabled !== false)) eqRouting = true;
+    }
+    if (forced) {
+      queue = forced.tracks;
+      startIdx = forced.index;
+      activeQueueName = forced.name || '';
+    } else if (PLAYLIST) {
+      const p = await fetch('/api/playlists/' + encodeURIComponent(PLAYLIST)).then((r) => r.json());
+      queue = Array.isArray(p.tracks) ? p.tracks : [];
+      activeQueueName = PLAYLIST;
+    } else {
+      queue = Array.isArray(d.tracks) ? d.tracks : [];
+      activeQueueName = typeof d.name === 'string' ? d.name : '';
+      if (d.position && typeof d.position.idx === 'number' &&
+          d.position.idx >= 0 && d.position.idx < queue.length) {
+        startIdx = d.position.idx;
+        startT = typeof d.position.t === 'number' ? d.position.t : 0;
+      }
+    }
+  } catch { /* retried below */ }
+
+  if (VOLP !== null && VOLP !== '') vol = Math.max(0, Math.min(100, Number(VOLP) || 0));
+  baseVol = Math.pow(vol / 100, 1.6);
+
+  if (!queue.length) {
+    setTitle(PLAYLIST ? `PLAYLIST "${PLAYLIST.toUpperCase()}" IS EMPTY` : 'QUEUE IS EMPTY — RETRYING…');
+    amp.classList.remove('off');
+    queueRetryTimer = setTimeout(startPlayer, 8000);
+    return;
+  }
+
+  audio = new Audio();
+  audio.autoplay = true;
+  audio.volume = baseVol;
+  const reconnectRadio = (t) => {
+    const delays = [2000, 5000, 10000, 20000, 30000];
+    const delay = delays[Math.min(radioRetry++, delays.length - 1)];
+    clearTimeout(radioRetryTimer);
+    radioRetryTimer = setTimeout(() => {
+      if (queue[qi] && trackKey(queue[qi]) === trackKey(t)) playCurrent(0);
+    }, delay);
+  };
+  audio.addEventListener('ended', () => {
+    if (queue[qi]?.storage === 'radio') { reconnectRadio(queue[qi]); return; }
+    errStreak = 0; next(true);
+  });
+  audio.addEventListener('error', () => {
+    const t = queue[qi];
+    if (t?.storage === 'radio') {
+      reconnectRadio(t);
+      return;
+    }
+    if (++errStreak > queue.length) { localState('stopped'); return; }
+    next();
+  });
+  audio.addEventListener('playing', () => {
+    errStreak = 0;
+    radioRetry = 0;
+    localState('playing');
+    if (actx && actx.state === 'suspended') actx.resume().catch(() => {});
+    ensureAnalyser();
+    if (awaitingClick) {
+      awaitingClick = false;
+      amp.classList.remove('clickable');
+      const tq = queue[qi];
+      if (tq) setTitle(trackLabel(tq).toUpperCase());
+    }
+  });
+  audio.addEventListener('pause', () => { if (!audio.ended) localState('paused'); });
+
+  qi = shuffleOn ? Math.floor(Math.random() * queue.length) : startIdx;
+  if (forced?.play === false) localState('stopped', queue[qi]);
+  else playCurrent(shuffleOn ? 0 : startT);
+
+  // Zero-click watchdog: OBS never sends gestures, so if playback
+  // hasn't started (or ever stalls paused), keep nudging it.
+  let playKicks = 0;
+  setInterval(() => {
+    if (!audio) return;
+    if (!audio.paused) {
+      playKicks = 0;
+      if (!analyser) ensureAnalyser(); // captureStream tracks can arrive late
+      return;
+    }
+    if (playKicks < 8) {
+      playKicks++;
+      audio.play().then(() => {
+        awaitingClick = false;
+        amp.classList.remove('clickable');
+        ensureAnalyser();
+      }).catch(() => {});
+    }
+  }, 2000);
+}
+
+function trackLabel(t) {
+  return t.artist ? `${t.artist} - ${t.title}` : (t.title || 'UNKNOWN TRACK');
+}
+function trackUrl(t) {
+  if (t.storage === 'radio') {
+    const q = new URLSearchParams({ url: t.url || '', name: t.title || 'Internet Radio' });
+    return `/api/radio/${encodeURIComponent(t.stationId || t.file)}/stream?${q}`;
+  }
+  const file = t.file.split('/').map(encodeURIComponent).join('/');
+  return t.storage === 'playlist' && t.playlist
+    ? `/playlist-media/${encodeURIComponent(t.playlist)}/${file}`
+    : t.storage === 'path' && t.sourceId
+      ? `/path-media/${encodeURIComponent(t.sourceId)}`
+    : `/music/${file}`;
+}
+
+function playCurrent(seekTo = 0) {
+  const t = queue[qi];
+  clearTimeout(radioRetryTimer);
+  currentRadioTitle = '';
+  audio.src = trackUrl(t);
+  if (seekTo > 0.5) {
+    audio.addEventListener('loadedmetadata', () => {
+      audio.currentTime = Math.min(seekTo, Math.max(0, (audio.duration || seekTo) - 0.5));
+    }, { once: true });
+  }
+  localState('playing', t);
+  fetchJukeGain(t);
+  const p = audio.play();
+  if (p) p.then(ensureAnalyser).catch(() => {
+    // Autoplay blocked (regular browsers) — OBS's CEF permits it,
+    // so in OBS this path never runs. Retry once, then offer a click.
+    localState('paused', t);
+    awaitingClick = true;
+    setTitle('CLICK TO START ▞▞ ' + trackLabel(t).toUpperCase());
+    amp.classList.add('clickable');
+    const kick = () => {
+      if (actx) actx.resume();
+      audio.play().then(ensureAnalyser).catch(() => {});
+    };
+    setTimeout(kick, 1200);
+    amp.addEventListener('click', kick, { once: true });
+  });
+}
+
+function next(auto = false) {
+  if (!queue.length) return;
+  if (auto && repeatMode === 'one') { playCurrent(0); return; }
+  if (auto && repeatMode === 'off' && !shuffleOn && qi >= queue.length - 1) {
+    audio.pause();
+    localState('stopped');
+    return;
+  }
+  qi = shuffleOn && queue.length > 1
+    ? (() => { let j; do { j = Math.floor(Math.random() * queue.length); } while (j === qi); return j; })()
+    : (qi + 1) % queue.length;
+  playCurrent(0);
+}
+
+const JSRC = PLAYLIST ? 'juke-pl' : 'juke-q';
+function localState(status, track) {
+  const t = track || queue[qi] || {};
+  applyState({
+    type: 'state',
+    src: JSRC,
+    status,
+    title: currentRadioTitle || t.title || '',
+    artist: t.artist || '',
+    file: t.file || '',
+    storage: t.storage || 'library',
+    playlist: t.playlist || '',
+    sourceId: t.sourceId || '',
+    queueName: activeQueueName,
+    originalFile: t.originalFile || '',
+    station: t.storage === 'radio' ? t.title || '' : '',
+    trackKey: trackKey(t),
+    bitrate: t.bitrate || 0,
+    sampleRate: t.sampleRate || 0,
+    duration: t.duration || (audio && isFinite(audio.duration) ? Math.round(audio.duration) : 0),
+    t: audio ? audio.currentTime : 0,
+    ts: Date.now(),
+    idx: qi,
+    count: queue.length
+  });
+  pushState();
+}
+
+function ensureAnalyser() {
+  if (eqRouting) { ensureEqGraph(); return; }
+  // The analyser taps a captureStream() COPY of the element's audio.
+  // Crucially we never route the element itself through Web Audio:
+  // its output stays on the normal media pipeline, which OBS's
+  // "Control audio via OBS" rerouting captures reliably (Web Audio
+  // destination output historically does not get captured there).
+  // If anything here fails, audio is unaffected — vis stays synthetic.
+  if (analyser || !audio || !window.AudioContext) return;
+  try {
+    actx = actx || new AudioContext();
+    if (actx.state === 'suspended') actx.resume().catch(() => {});
+    if (actx.state === 'suspended') return;
+    if (!capStream) capStream = audio.captureStream ? audio.captureStream() : null;
+    if (!capStream || !capStream.getAudioTracks().length) return; // tracks appear once playing — retried
+    const src = actx.createMediaStreamSource(capStream);
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.82;
+    src.connect(analyser); // analysis only — never connected to destination
+  } catch { analyser = null; }
+}
+
+function appendWidth(node, width) {
+  const splitter = actx.createChannelSplitter(2), merger = actx.createChannelMerger(2);
+  const ll = actx.createGain(), lr = actx.createGain(), rl = actx.createGain(), rr = actx.createGain();
+  const direct = (1 + width) / 2, cross = (1 - width) / 2;
+  ll.gain.value = direct; rr.gain.value = direct; lr.gain.value = cross; rl.gain.value = cross;
+  node.connect(splitter);
+  splitter.connect(ll, 0); splitter.connect(lr, 0); splitter.connect(rl, 1); splitter.connect(rr, 1);
+  ll.connect(merger, 0, 0); rl.connect(merger, 0, 0); lr.connect(merger, 0, 1); rr.connect(merger, 0, 1);
+  dspNodes.push(splitter, merger, ll, lr, rl, rr);
+  return merger;
+}
+
+function appendDspRack(node) {
+  dspNodes = [];
+  for (const module of dspPrefs.filter((m) => m && m.enabled !== false)) {
+    const v = Number(module.value);
+    if (module.type === 'width' || module.type === 'mono') {
+      node = appendWidth(node, module.type === 'mono' ? 0 : Math.max(0, Math.min(2, v)));
+    } else if (module.type === 'bass') {
+      const bass = actx.createBiquadFilter(); bass.type = 'lowshelf'; bass.frequency.value = 120; bass.gain.value = Math.max(0, Math.min(12, v));
+      node.connect(bass); node = bass; dspNodes.push(bass);
+    } else if (module.type === 'compressor' || module.type === 'limiter') {
+      const comp = actx.createDynamicsCompressor();
+      if (module.type === 'limiter') {
+        comp.threshold.value = -1 - (1 - v) * 5; comp.knee.value = 0; comp.ratio.value = 20; comp.attack.value = .001; comp.release.value = .06;
+      } else {
+        comp.threshold.value = -12 - v * 24; comp.knee.value = 24; comp.ratio.value = 2 + v * 8; comp.attack.value = .006; comp.release.value = .22;
+      }
+      node.connect(comp); node = comp; dspNodes.push(comp);
+    } else if (module.type === 'reverb') {
+      const output = actx.createGain(), dry = actx.createGain(), wet = actx.createGain(), convolver = actx.createConvolver();
+      const amount = Math.max(0, Math.min(.65, v));
+      const length = Math.floor(actx.sampleRate * 1.6), impulse = actx.createBuffer(2, length, actx.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const data = impulse.getChannelData(ch);
+        for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 2.6);
+      }
+      convolver.buffer = impulse; dry.gain.value = 1 - amount * .35; wet.gain.value = amount;
+      node.connect(dry); dry.connect(output); node.connect(convolver); convolver.connect(wet); wet.connect(output);
+      node = output; dspNodes.push(output, dry, wet, convolver);
+    }
+  }
+  return node;
+}
+
+function rebuildProcessedGraph() {
+  if (!actx || !eqSource || !analyser || !obsMasterGain) return;
+  for (const node of [eqSource, normNode, ...eqFilters, ...dspNodes, outputLevelMeter, outputLevelGain, outputSafetyLimiter, obsPanner].filter(Boolean)) {
+    try { node.disconnect(); } catch { /* disconnected */ }
+  }
+  obsPanner = null;
+  let node = eqSource;
+  normNode = actx.createGain();
+  node.connect(normNode); node = normNode;
+  eqFilters = EQ_FREQS.map((f, i) => {
+    const b = actx.createBiquadFilter();
+    b.type = i === 0 ? 'lowshelf' : i === EQ_FREQS.length - 1 ? 'highshelf' : 'peaking';
+    b.frequency.value = f; b.Q.value = 1.0;
+    node.connect(b); node = b;
+    return b;
+  });
+  node = appendDspRack(node);
+  outputLevelMeter = actx.createAnalyser();
+  outputLevelMeter.fftSize = 2048;
+  outputLevelMeter.smoothingTimeConstant = 0;
+  node.connect(outputLevelMeter); node = outputLevelMeter;
+  outputLevelGain = actx.createGain();
+  node.connect(outputLevelGain); node = outputLevelGain;
+  outputSafetyLimiter = actx.createDynamicsCompressor();
+  outputSafetyLimiter.threshold.value = -1.5;
+  outputSafetyLimiter.knee.value = 0;
+  outputSafetyLimiter.ratio.value = 20;
+  outputSafetyLimiter.attack.value = .002;
+  outputSafetyLimiter.release.value = .08;
+  node.connect(outputSafetyLimiter); node = outputSafetyLimiter;
+  if (typeof actx.createStereoPanner === 'function') {
+    obsPanner = actx.createStereoPanner();
+    obsPanner.pan.value = balanceValue / 100;
+    node.connect(obsPanner);
+    node = obsPanner;
+  }
+  node.connect(obsMasterGain);
+  applyEqPrefs();
+  applyJukeVolume();
+  resetObsOutputLeveler(false);
+}
+
+function ensureNormalizationRouting() {
+  if (!normalizeOn || typeof curGain !== 'number' || curGain <= 0 || eqSource || !audio) return;
+  try { if (analyser) analyser.disconnect(); } catch { /* analysis-only node */ }
+  analyser = null;
+  abuf = null;
+  wbuf = null;
+  eqRouting = true;
+  ensureEqGraph();
+}
+
+function ensureEqGraph() {
+  // ?eq=1 routes the element through Web Audio biquads so the deck's
+  // EQ curve shapes the jukebox output too. Tradeoff: OBS's "Control
+  // audio via OBS" rerouting may not capture Web Audio on some OBS
+  // versions — with ?eq=1, capture via Desktop/Application Audio, or
+  // verify your OBS version first. Suspended-context guard included.
+  if (analyser || !audio || !window.AudioContext) return;
+  try {
+    actx = actx || new AudioContext();
+    if (actx.state === 'suspended') actx.resume().catch(() => {});
+    if (actx.state === 'suspended') return; // never wire into a muted ctx
+    eqSource = actx.createMediaElementSource(audio);
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.82;
+    obsMasterGain = actx.createGain();
+    obsMasterGain.connect(analyser);
+    analyser.connect(actx.destination);
+    rebuildProcessedGraph();
+  } catch { analyser = null; obsMasterGain = null; eqFilters = []; }
+}
+
+function sampleLocalAudio() {
+  if (!abuf) abuf = new Uint8Array(analyser.frequencyBinCount);
+  if (!wbuf) wbuf = new Uint8Array(analyser.fftSize);
+  analyser.getByteFrequencyData(abuf);
+  const usable = Math.floor(abuf.length * 0.72);
+  for (let i = 0; i < BARS; i++) {
+    const lo = Math.floor(usable * Math.pow(i / BARS, 1.8));
+    const hi = Math.max(lo + 1, Math.floor(usable * Math.pow((i + 1) / BARS, 1.8)));
+    let v = 0;
+    for (let j = lo; j < hi; j++) v = Math.max(v, abuf[j]);
+    tgt[i] = v / 255;
+  }
+  analyser.getByteTimeDomainData(wbuf);
+  const stride = Math.floor(wbuf.length / WAVE);
+  for (let i = 0; i < WAVE; i++) wave[i] = wbuf[i * stride] / 255;
+}
+
+// ── demo mode ───────────────────────────────────────────
+let demoStart = 0, demoApplied = false;
+function demoTick(now) {
+  if (!demoStart) demoStart = now;
+  synthStep(now);
+  if (!demoApplied) {
+    demoApplied = true;
+    applyState({
+      type: 'state', status: 'playing',
+      title: 'Signal Test', artist: 'CMDR Demo',
+      file: '', bitrate: 320, sampleRate: 44100,
+      duration: 245, t: 0, ts: Date.now(), idx: 2, count: 12
+    });
+  }
+  state.t = ((now - demoStart) / 1000) % 245;
+  state.ts = Date.now();
+}
+
+// ── boot ────────────────────────────────────────────────
+const bootAt = Date.now();
+sizeVis();
+(async () => {
+  if (THEMEP && THEMES[THEMEP]) applyTheme(THEMEP);
+  try {
+    const d = await fetch('/api/session').then((r) => r.json());
+    applyRemoteObsSettings(d);
+  } catch { /* neon default */ }
+})();
+setTitle(PLAYMODE ? 'LOADING QUEUE…' : 'WAITING FOR SIGNAL…');
+amp.classList.remove('off');
+requestAnimationFrame(frame);
+if (DEMO) { /* synthetic only */ }
+else if (PLAYMODE) { startPlayer(); jukeboxWs(); }
+else connect();
+</script>
+</body>
+</html>

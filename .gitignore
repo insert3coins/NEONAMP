@@ -1,4 +1,59 @@
-/target
+# ══════════════════════════════════════════════════════════════════════
+# NEONAMP
+# Everything listed here is a secret, someone's audio library, a build
+# artefact, or state the server recreates on its own. Paths starting with
+# "/" are anchored to the project root.
+# ══════════════════════════════════════════════════════════════════════
 
-# contact sheet from make_icon.py; regenerate rather than commit
-icon/preview.png
+# ── secrets ───────────────────────────────────────────────────────────
+# twitch-auth.json holds live OAuth access and refresh tokens.
+# twitch-config.json holds the app clientSecret.
+# Both are read with a safe fallback and rewritten by the /twitch
+# console, so a fresh clone just reconnects.
+/twitch-auth.json
+/twitch-config.json
+.env
+.env.*
+
+# ── your library, not the project's ───────────────────────────────────
+# server.js recreates music/, playlists/ and playlist-media/ on boot
+# (fs.mkdir recursive), so ignoring them wholesale is safe.
+/music/
+/playlists/
+/playlist-media/
+/radio-stations.json
+
+# ── runtime state and caches ──────────────────────────────────────────
+# Queue, track position, volume, EQ curve — rewritten every few seconds.
+/settings.json
+/loudness-cache.json
+
+# ── bundled ffmpeg ────────────────────────────────────────────────────
+# ~100 MB each: over GitHub's hard per-file limit. Install ffmpeg on PATH
+# instead, or drop these back in beside server.js.
+/ffmpeg.exe
+/ffplay.exe
+/ffprobe.exe
+
+# ── metadata sidecars ─────────────────────────────────────────────────
+# Written beside the source audio, wherever that lives.
+*.neonamp.json
+
+# ── dependencies ──────────────────────────────────────────────────────
+# package-lock.json is deliberately NOT ignored — it pins the install.
+node_modules/
+
+# ── desktop shell build output ────────────────────────────────────────
+# Also covered by desktop/.gitignore; repeated here so a clone of the
+# root alone still stays clean.
+/desktop/target/
+/desktop/icon/preview.png
+
+# ── logs, editors, OS litter ──────────────────────────────────────────
+*.log
+npm-debug.log*
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
