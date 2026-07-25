@@ -1,0 +1,4 @@
+/target
+
+# contact sheet from make_icon.py; regenerate rather than commit
+icon/preview.png

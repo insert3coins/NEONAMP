@@ -1,0 +1,3 @@
+// Icon resource. ID 1 is what Explorer and the taskbar pick up as the
+// application icon, so it must stay first.
+1 ICON "neonamp.ico"

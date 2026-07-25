@@ -1,0 +1,19 @@
+[package]
+name = "neonamp-desktop"
+version = "1.0.0"
+edition = "2024"
+description = "Native frameless shell for the NEONAMP deck. Hosts the server UI in WebView2."
+
+[dependencies]
+tao = "0.35"
+wry = "0.55.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[build-dependencies]
+embed-resource = "3.0.11"
