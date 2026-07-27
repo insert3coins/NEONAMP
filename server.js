@@ -23,6 +23,7 @@ const PORT = process.env.PORT || 3090;
 const MUSIC_DIR = process.env.NEONAMP_MUSIC || path.join(__dirname, 'music');
 const PLAYLIST_DIR = path.join(__dirname, 'playlists');
 const PLAYLIST_MEDIA_DIR = path.join(__dirname, 'playlist-media');
+const YOUTUBE_DIR = path.join(__dirname, 'youtube-cache');
 const SETTINGS_FILE = path.join(__dirname, 'settings.json');
 const RADIO_FILE = path.join(__dirname, 'radio-stations.json');
 
@@ -30,9 +31,31 @@ const AUDIO_EXT = new Set([
   '.mp3', '.ogg', '.oga', '.wav', '.flac', '.m4a', '.aac', '.opus', '.webm'
 ]);
 
+// child_process.execFile('ffmpeg', ...) resolves a bare command name via
+// the PATH env var only — it does NOT get the "search the current
+// directory" behavior that cmd.exe's `where` (and CreateProcess when the
+// OS itself launches a process) gets. So a project-root ffmpeg.exe next
+// to server.js is invisible to execFile, and to yt-dlp's own PATH lookup,
+// unless we point at it explicitly. Resolved once, reused everywhere.
+let ffmpegBinCache; // undefined = not checked yet
+async function ffmpegBin() {
+  if (ffmpegBinCache === undefined) {
+    const exeName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+    const local = path.join(__dirname, exeName);
+    try { await fs.access(local); ffmpegBinCache = local; }
+    catch { ffmpegBinCache = 'ffmpeg'; } // not bundled — rely on PATH
+  }
+  return ffmpegBinCache;
+}
+async function ffmpegDir() {
+  const bin = await ffmpegBin();
+  return bin === 'ffmpeg' ? '' : path.dirname(bin);
+}
+
 await fs.mkdir(MUSIC_DIR, { recursive: true });
 await fs.mkdir(PLAYLIST_DIR, { recursive: true });
 await fs.mkdir(PLAYLIST_MEDIA_DIR, { recursive: true });
+await fs.mkdir(YOUTUBE_DIR, { recursive: true });
 
 // One-time migration: sessions used to live in playlists/_session.json
 try {
@@ -52,6 +75,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // read-only so old sessions/playlists continue without data migration.
 app.use('/music', express.static(MUSIC_DIR));
 app.use('/playlist-media', express.static(PLAYLIST_MEDIA_DIR));
+app.use('/youtube-media', express.static(YOUTUBE_DIR));
 
 function safeName(name) {
   if (typeof name !== 'string') return null;
@@ -109,6 +133,12 @@ function trackRef(track) {
     if (!full.startsWith(root + path.sep)) return null;
     return { storage: 'playlist', playlist, rel, full, key: `playlist:${playlist}:${rel}` };
   }
+  if (track?.storage === 'youtube') {
+    const root = path.resolve(YOUTUBE_DIR);
+    const full = path.resolve(root, rel);
+    if (!full.startsWith(root + path.sep)) return null;
+    return { storage: 'youtube', playlist: '', rel, full, key: `youtube:${rel}` };
+  }
   const root = path.resolve(MUSIC_DIR);
   const full = path.resolve(root, ...rel.split('/'));
   if (!full.startsWith(root + path.sep)) return null;
@@ -124,7 +154,7 @@ function requestTrackRef(req) {
   }
   return trackRef({
     file: req.query.file,
-    storage: req.query.storage === 'playlist' ? 'playlist' : 'library',
+    storage: req.query.storage === 'playlist' ? 'playlist' : req.query.storage === 'youtube' ? 'youtube' : 'library',
     playlist: req.query.playlist
   });
 }
@@ -353,6 +383,171 @@ app.get('/api/radio/:id/stream', async (req, res) => {
     else res.end();
   }
 });
+
+// ------------------------------------------------------------
+// YouTube audio import — video/playlist URLs are resolved and the
+// audio extracted via yt-dlp (+ffmpeg) into ./youtube-cache, tagged
+// and thumbnailed on the way in so the existing metadata/art/loudness
+// pipeline picks them up exactly like any other library file. Single
+// videos download inline (instantly playable); playlist URLs enqueue
+// a background, one-at-a-time download queue with progress pushed
+// over /ws, same shape as the loudness analysis queue below.
+// ------------------------------------------------------------
+const YOUTUBE_HOSTS = new Set([
+  'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be'
+]);
+let ytDlpOk = null;
+
+function ytDlpAvailable() {
+  if (ytDlpOk !== null) return Promise.resolve(ytDlpOk);
+  return new Promise((resolve) => {
+    execFile('yt-dlp', ['--version'], { timeout: 5000 }, (err) => {
+      ytDlpOk = !err;
+      if (!ytDlpOk) console.log('  [youtube] yt-dlp not found — YouTube import disabled (install yt-dlp and ensure it is on PATH)');
+      resolve(ytDlpOk);
+    });
+  });
+}
+
+function safeYoutubeUrl(value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 2048) return null;
+  try {
+    const u = new URL(value.trim());
+    if (!['http:', 'https:'].includes(u.protocol)) return null;
+    if (!YOUTUBE_HOSTS.has(u.hostname.toLowerCase())) return null;
+    return u.toString();
+  } catch { return null; }
+}
+
+function safeVideoId(value) {
+  const id = typeof value === 'string' ? value.trim() : '';
+  return /^[A-Za-z0-9_-]{6,24}$/.test(id) ? id : null;
+}
+
+function lastErrorLine(text) {
+  return String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop() || 'yt-dlp failed';
+}
+
+function resolveYoutube(url) {
+  return new Promise((resolve, reject) => {
+    execFile('yt-dlp', ['-J', '--flat-playlist', '--no-warnings', url], {
+      timeout: 45000, maxBuffer: 32 * 1024 * 1024
+    }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(lastErrorLine(stderr) || err.message));
+      try { resolve(JSON.parse(stdout)); }
+      catch { reject(new Error('yt-dlp returned an unexpected response')); }
+    });
+  });
+}
+
+async function downloadYoutubeAudio(videoId) {
+  const dest = path.join(YOUTUBE_DIR, `${videoId}.m4a`);
+  try { await fs.access(dest); return; } catch { /* not cached yet */ }
+  const ffDir = await ffmpegDir();
+  const args = [
+    '-f', 'bestaudio/best', '-x', '--audio-format', 'm4a', '--audio-quality', '0',
+    '--embed-thumbnail', '--embed-metadata', '--no-playlist', '--no-warnings', '--no-progress',
+    ...(ffDir ? ['--ffmpeg-location', ffDir] : []),
+    '-o', path.join(YOUTUBE_DIR, '%(id)s.%(ext)s'),
+    `https://www.youtube.com/watch?v=${videoId}`
+  ];
+  return new Promise((resolve, reject) => {
+    execFile('yt-dlp', args, { timeout: 6 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 }, (err, _stdout, stderr) => {
+      if (err) return reject(new Error(lastErrorLine(stderr) || err.message));
+      fs.access(dest).then(resolve, () => reject(new Error('Download finished but the output file is missing')));
+    });
+  });
+}
+
+const ytQueue = [];
+const ytQueued = new Set();
+// videoId -> { videoId, playlist, title, status: 'queued'|'downloading'|'error', error? }
+// Holds every job that isn't finished yet, plus failed ones (until retried),
+// so a freshly (re)loaded playlist manager can ask "what's still in flight
+// / what failed" instead of only learning about it from a /ws event it
+// happened to be connected for.
+const ytJobs = new Map();
+let ytBusy = false;
+
+function enqueueYoutube(videoId, playlist, title) {
+  if (ytQueued.has(videoId)) return;
+  ytQueued.add(videoId);
+  const job = { videoId, playlist, title, status: 'queued' };
+  ytJobs.set(videoId, job);
+  ytQueue.push(job);
+  broadcastYoutube('queued', job);
+  pumpYoutube();
+}
+
+function broadcastYoutube(event, job, error) {
+  const remaining = ytQueue.length + (ytBusy ? 1 : 0);
+  const data = JSON.stringify({
+    type: 'youtube', event, videoId: job.videoId, playlist: job.playlist, title: job.title,
+    remaining, ...(error ? { error } : {})
+  });
+  for (const c of wssRef.clients) {
+    if (c.readyState === WebSocket.OPEN) { try { c.send(data); } catch { /* ignore */ } }
+  }
+}
+
+async function pumpYoutube() {
+  if (ytBusy) return;
+  const job = ytQueue.shift();
+  if (!job) return;
+  ytBusy = true;
+  job.status = 'downloading';
+  broadcastYoutube('downloading', job);
+  try {
+    await downloadYoutubeAudio(job.videoId);
+    enqueueLoudness(trackRef({ storage: 'youtube', file: `${job.videoId}.m4a` }), true);
+    job.status = 'ready';
+  } catch (err) {
+    job.status = 'error';
+    job.error = err.message;
+  }
+  ytQueued.delete(job.videoId);
+  if (job.status === 'ready') ytJobs.delete(job.videoId);
+  ytBusy = false;
+  broadcastYoutube(job.status, job, job.error);
+  if (ytQueue.length) setTimeout(pumpYoutube, 250);
+}
+
+// youtube-cache is a shared cache keyed by videoId (like the music library
+// or a registered filepath source) — the same download can be referenced
+// by more than one playlist. Deleting a playlist should reclaim the disk
+// space for videos it uniquely owned, but never remove one another saved
+// playlist still points at.
+async function youtubeIdsStillInUse(excludeName) {
+  const inUse = new Set();
+  let files = [];
+  try { files = (await fs.readdir(PLAYLIST_DIR)).filter((f) => f.endsWith('.json') && !f.startsWith('_')); } catch { return inUse; }
+  for (const file of files) {
+    if (file.replace(/\.json$/i, '') === excludeName) continue;
+    try {
+      const data = JSON.parse(await fs.readFile(path.join(PLAYLIST_DIR, file), 'utf8'));
+      for (const t of (Array.isArray(data.tracks) ? data.tracks : [])) {
+        if (t?.storage === 'youtube' && t.videoId) inUse.add(t.videoId);
+      }
+    } catch { /* skip corrupt files */ }
+  }
+  return inUse;
+}
+
+async function pruneYoutubeCache(tracks, excludeName) {
+  const videoIds = [...new Set((tracks || []).filter((t) => t?.storage === 'youtube' && t.videoId).map((t) => t.videoId))];
+  if (!videoIds.length) return;
+  const inUse = await youtubeIdsStillInUse(excludeName);
+  const cache = await loadLoudCache();
+  let cacheChanged = false;
+  for (const id of videoIds) {
+    if (inUse.has(id)) continue;
+    const full = path.join(YOUTUBE_DIR, `${id}.m4a`);
+    await fs.unlink(full).catch(() => {});
+    await fs.unlink(sidecarPath(full)).catch(() => {});
+    if (cache[`youtube:${id}.m4a`]) { delete cache[`youtube:${id}.m4a`]; cacheChanged = true; }
+  }
+  if (cacheChanged) loudDirty = true;
+}
 
 // ------------------------------------------------------------
 // Audio metadata (cached by path/mtime/size)
@@ -691,10 +886,12 @@ let loudBusy = false;
 function ffmpegAvailable() {
   if (ffmpegOk !== null) return Promise.resolve(ffmpegOk);
   return new Promise((resolve) => {
-    execFile('ffmpeg', ['-version'], { timeout: 5000 }, (err) => {
-      ffmpegOk = !err;
-      if (!ffmpegOk) console.log('  [loudness] ffmpeg not found — normalization disabled (install ffmpeg to enable)');
-      resolve(ffmpegOk);
+    ffmpegBin().then((bin) => {
+      execFile(bin, ['-version'], { timeout: 5000 }, (err) => {
+        ffmpegOk = !err;
+        if (!ffmpegOk) console.log('  [loudness] ffmpeg not found — normalization disabled (install ffmpeg to enable)');
+        resolve(ffmpegOk);
+      });
     });
   });
 }
@@ -720,12 +917,14 @@ function gainFromLufs(lufs) {
 
 function measureLufs(full) {
   return new Promise((resolve) => {
-    execFile('ffmpeg', [
-      '-hide_banner', '-nostats', '-i', full,
-      '-map', 'a:0', '-af', 'ebur128=framelog=quiet', '-f', 'null', '-'
-    ], { timeout: 5 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-      const m = String(stderr || '').match(/I:\s+(-?\d+(?:\.\d+)?)\s+LUFS/);
-      resolve(m ? Number(m[1]) : null);
+    ffmpegBin().then((bin) => {
+      execFile(bin, [
+        '-hide_banner', '-nostats', '-i', full,
+        '-map', 'a:0', '-af', 'ebur128=framelog=quiet', '-f', 'null', '-'
+      ], { timeout: 5 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const m = String(stderr || '').match(/I:\s+(-?\d+(?:\.\d+)?)\s+LUFS/);
+        resolve(m ? Number(m[1]) : null);
+      });
     });
   });
 }
@@ -823,6 +1022,7 @@ function exposedPlaylist(data, name) {
     name,
     tracks: (Array.isArray(data?.tracks) ? data.tracks : []).map((t) =>
       t?.storage === 'radio' ? { ...t, storage: 'radio' }
+        : t?.storage === 'youtube' ? { ...t, storage: 'youtube' }
         : t?.storage === 'path' ? filepathTrack(t)
         : owned ? playlistTrack(t, name) : { ...t, storage: 'library' }
     )
@@ -841,7 +1041,7 @@ async function linkOrCopy(source, dest) {
 async function prunePlaylistMedia(name, tracks) {
   const root = path.resolve(PLAYLIST_MEDIA_DIR, name);
   if (!root.startsWith(path.resolve(PLAYLIST_MEDIA_DIR) + path.sep)) return;
-  const keep = new Set((tracks || []).filter((t) => t?.storage !== 'radio' && t?.storage !== 'path')
+  const keep = new Set((tracks || []).filter((t) => t?.storage !== 'radio' && t?.storage !== 'path' && t?.storage !== 'youtube')
     .map((t) => safeAudioRel(t?.file)).filter(Boolean));
   const files = await walk(root);
   for (const file of files) {
@@ -897,6 +1097,25 @@ async function writeOwnedPlaylist(name, inputTracks) {
         album: String(input.album || ''), genre: String(input.genre || ''),
         homepage: safeStationUrl(input.homepage) || '', duration: 0,
         bitrate: Number(input.bitrate) || 0, sampleRate: 0, channels: 2
+      });
+      continue;
+    }
+    if (input?.storage === 'youtube') {
+      const id = safeVideoId(input.videoId);
+      if (!id) {
+        const err = new Error(`Invalid YouTube track: ${input?.title || 'unknown'}`);
+        err.status = 409;
+        throw err;
+      }
+      tracks.push({
+        storage: 'youtube', file: `${id}.m4a`, videoId: id,
+        sourceUrl: safeYoutubeUrl(input.sourceUrl) || `https://www.youtube.com/watch?v=${id}`,
+        title: String(input.title || 'Untitled').slice(0, 300),
+        artist: String(input.artist || 'YouTube').slice(0, 300),
+        album: String(input.album || '').slice(0, 300), genre: String(input.genre || '').slice(0, 300),
+        year: String(input.year || '').slice(0, 16),
+        duration: Math.max(0, Math.round(Number(input.duration)) || 0),
+        bitrate: Number(input.bitrate) || 0, sampleRate: Number(input.sampleRate) || 0, channels: Number(input.channels) || 2
       });
       continue;
     }
@@ -964,6 +1183,25 @@ async function materializePlaylist(name, inputTracks, saved = new Date().toISOSt
           album: String(input.album || ''), genre: String(input.genre || ''),
           homepage: safeStationUrl(input.homepage) || '', duration: 0,
           bitrate: Number(input.bitrate) || 0, sampleRate: 0, channels: 2
+        });
+        continue;
+      }
+      if (input?.storage === 'youtube') {
+        const id = safeVideoId(input.videoId);
+        if (!id) {
+          const err = new Error(`Cannot save invalid YouTube track: ${input?.title || 'unknown'}`);
+          err.status = 409;
+          throw err;
+        }
+        tracks.push({
+          storage: 'youtube', file: `${id}.m4a`, videoId: id,
+          sourceUrl: safeYoutubeUrl(input.sourceUrl) || `https://www.youtube.com/watch?v=${id}`,
+          title: String(input.title || 'Untitled').slice(0, 300),
+          artist: String(input.artist || 'YouTube').slice(0, 300),
+          album: String(input.album || '').slice(0, 300), genre: String(input.genre || '').slice(0, 300),
+          year: String(input.year || '').slice(0, 16),
+          duration: Math.max(0, Math.round(Number(input.duration)) || 0),
+          bitrate: Number(input.bitrate) || 0, sampleRate: Number(input.sampleRate) || 0, channels: Number(input.channels) || 2
         });
         continue;
       }
@@ -1089,7 +1327,7 @@ app.put('/api/playlists/:name', async (req, res) => {
   if (!tracks) return res.status(400).json({ error: 'Body must include a tracks array' });
 
   try {
-    const alreadyOwned = tracks.every((t) => t?.storage === 'radio' || t?.storage === 'path' ||
+    const alreadyOwned = tracks.every((t) => t?.storage === 'radio' || t?.storage === 'path' || t?.storage === 'youtube' ||
       (t?.storage === 'playlist' && safeName(t.playlist) === name));
     const data = alreadyOwned
       ? await writeOwnedPlaylist(name, tracks)
@@ -1169,6 +1407,76 @@ app.post('/api/playlists/:name/paths', async (req, res) => {
   } catch (err) {
     res.status(err?.code === 'ENOENT' ? 404 : 500).json({ error: err?.code === 'ENOENT' ? 'Playlist or source file not found' : err.message });
   }
+});
+
+// A single video downloads inline so it is instantly playable; a playlist
+// URL is resolved (fast — no audio fetched yet) and its videos queued for
+// background download, one at a time, with progress over /ws.
+app.post('/api/playlists/:name/youtube', async (req, res) => {
+  const name = safeName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid playlist name' });
+  const url = safeYoutubeUrl(req.body?.url);
+  if (!url) return res.status(400).json({ error: 'A valid YouTube video or playlist URL is required' });
+  if (!(await ytDlpAvailable())) {
+    return res.status(503).json({ error: 'yt-dlp was not found on PATH — install yt-dlp to add YouTube audio' });
+  }
+
+  const playlistFile = path.join(PLAYLIST_DIR, `${name}.json`);
+  let data;
+  try { data = JSON.parse(await fs.readFile(playlistFile, 'utf8')); }
+  catch { return res.status(404).json({ error: 'Create or select a playlist before adding YouTube audio' }); }
+
+  let info;
+  try { info = await resolveYoutube(url); }
+  catch (err) { return res.status(502).json({ error: `Could not resolve YouTube URL: ${err.message}` }); }
+
+  const isPlaylist = Array.isArray(info.entries);
+  const rawEntries = isPlaylist ? info.entries.slice(0, 300) : [info];
+  const playlistTitle = isPlaylist ? String(info.title || '').trim().slice(0, 300) : '';
+  const existing = Array.isArray(data.tracks) ? data.tracks : [];
+  const seenIds = new Set(existing.filter((t) => t?.storage === 'youtube').map((t) => t.videoId));
+
+  const stubs = [];
+  for (const e of rawEntries) {
+    const id = safeVideoId(e?.id);
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    stubs.push({
+      storage: 'youtube', file: `${id}.m4a`, videoId: id,
+      sourceUrl: `https://www.youtube.com/watch?v=${id}`,
+      title: String(e.title || 'Untitled').trim().slice(0, 300),
+      artist: String(e.uploader || e.channel || info.uploader || info.channel || 'YouTube').trim().slice(0, 300),
+      album: playlistTitle, genre: '', year: '',
+      duration: Math.max(0, Math.round(Number(e.duration)) || 0),
+      bitrate: 0, sampleRate: 0, channels: 2
+    });
+  }
+  if (!stubs.length) {
+    return res.status(400).json({ error: isPlaylist ? 'No new videos found in that playlist' : 'That video is already in this playlist' });
+  }
+  if (existing.length + stubs.length > 5000) return res.status(409).json({ error: 'A playlist can contain at most 5000 tracks' });
+
+  if (!isPlaylist) {
+    try { await downloadYoutubeAudio(stubs[0].videoId); }
+    catch (err) { return res.status(502).json({ error: `Download failed: ${err.message}` }); }
+    enqueueLoudness(trackRef(stubs[0]), true);
+  }
+
+  const next = { ...data, version: 2, name, saved: new Date().toISOString(), tracks: [...existing, ...stubs] };
+  await writeJsonFile(playlistFile, next);
+  const playlist = exposedPlaylist(next, name);
+
+  if (isPlaylist) {
+    for (const stub of stubs) enqueueYoutube(stub.videoId, name, stub.title);
+  }
+
+  res.json({ ok: true, name, count: playlist.tracks.length, added: stubs, queued: isPlaylist, tracks: playlist.tracks });
+});
+
+// Snapshot of in-flight downloads, so a (re)loaded playlist manager can show
+// current progress immediately instead of waiting on the next /ws event.
+app.get('/api/youtube/queue', (req, res) => {
+  res.json({ jobs: [...ytJobs.values()].map(({ videoId, playlist, title, status, error }) => ({ videoId, playlist, title, status, error })) });
 });
 
 async function unusedPlaylistUploadName(dir, name) {
@@ -1319,9 +1627,12 @@ app.delete('/api/playlists/:name', async (req, res) => {
   const name = safeName(req.params.name);
   if (!name) return res.status(400).json({ error: 'Invalid playlist name' });
   try {
-    await fs.access(path.join(PLAYLIST_DIR, `${name}.json`));
+    const raw = await fs.readFile(path.join(PLAYLIST_DIR, `${name}.json`), 'utf8');
+    let doomed = null;
+    try { doomed = JSON.parse(raw); } catch { /* corrupt playlist file — still deletable, nothing to prune */ }
     await fs.rm(path.join(PLAYLIST_MEDIA_DIR, name), { recursive: true, force: true });
     await fs.unlink(path.join(PLAYLIST_DIR, `${name}.json`));
+    await pruneYoutubeCache(doomed?.tracks, name).catch(() => {});
     const settings = await readJsonFile(SETTINGS_FILE, {});
     if (settings.name === name) {
       settings.name = '';

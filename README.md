@@ -188,6 +188,21 @@ metadata, and displays the live `StreamTitle`, bitrate, connection
 state, and reconnect countdown. Dropped connections retry with
 bounded backoff in both the deck and OBS jukebox.
 
+## YouTube audio import
+
+Use **＋ YOUTUBE** on `/playlist` to add a video or playlist URL to the
+selected playlist. NEONAMP extracts audio only — via `yt-dlp` and
+ffmpeg — into `youtube-cache/` and never touches or displays video; the
+result plays through the same deck, EQ, DSP, and normalization pipeline
+as any other track, with title, artist, duration, and thumbnail read
+straight from the downloaded file's embedded tags. A single video URL
+downloads immediately, ready to play as soon as the dialog closes; a
+playlist URL is resolved instantly and its tracks queue for background
+download one at a time, with progress reported live over `/ws`.
+Requires `yt-dlp` on PATH — install it separately (`pip install
+yt-dlp` or see [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp));
+without it, adding YouTube audio fails with a clear error.
+
 ## Playlist utilities
 
 The playlist **UTIL** menu can randomize or reverse the queue, remove
@@ -421,7 +436,9 @@ collapse their panels just like the original.
 - `PUT  /api/playlists/:name` — save `{ "tracks": [...] }` without copying filepath sources
 - `POST /api/files/pick` — open the server computer's native audio-file picker
 - `POST /api/playlists/:name/paths` — append `{ "paths": ["D:\\Music\\track.mp3"] }`
+- `POST /api/playlists/:name/youtube` — append `{ "url": "https://www.youtube.com/..." }` (video or playlist)
 - `GET  /path-media/:sourceId` — seekable playback for a registered filepath source
+- `GET  /youtube-media/:file` — seekable playback for downloaded YouTube audio
 - `PUT  /api/playlists/:name/upload?name=file.mp3` — legacy direct-upload compatibility
 - `POST /api/playlists/:name/activate` — load a playlist/track into the deck and OBS jukebox
 - `POST /api/playlists/:name/rename` — rename metadata and update live players

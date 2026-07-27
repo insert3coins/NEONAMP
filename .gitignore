@@ -16,11 +16,13 @@
 .env.*
 
 # ── your library, not the project's ───────────────────────────────────
-# server.js recreates music/, playlists/ and playlist-media/ on boot
-# (fs.mkdir recursive), so ignoring them wholesale is safe.
+# server.js recreates music/, playlists/, playlist-media/ and
+# youtube-cache/ on boot (fs.mkdir recursive), so ignoring them
+# wholesale is safe.
 /music/
 /playlists/
 /playlist-media/
+/youtube-cache/
 /radio-stations.json
 
 # ── runtime state and caches ──────────────────────────────────────────

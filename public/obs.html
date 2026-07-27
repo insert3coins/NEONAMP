@@ -494,7 +494,7 @@ function trackKey(t) {
 function mediaApiUrl(endpoint, t) {
   const q = new URLSearchParams({
     file: t.file,
-    storage: t.storage === 'playlist' ? 'playlist' : t.storage === 'path' ? 'path' : 'library'
+    storage: t.storage === 'playlist' ? 'playlist' : t.storage === 'path' ? 'path' : t.storage === 'youtube' ? 'youtube' : 'library'
   });
   if (t.storage === 'playlist' && t.playlist) q.set('playlist', t.playlist);
   if (t.storage === 'path' && t.sourceId) q.set('source', t.sourceId);
@@ -1152,6 +1152,8 @@ function trackUrl(t) {
     ? `/playlist-media/${encodeURIComponent(t.playlist)}/${file}`
     : t.storage === 'path' && t.sourceId
       ? `/path-media/${encodeURIComponent(t.sourceId)}`
+    : t.storage === 'youtube'
+      ? `/youtube-media/${file}`
     : `/music/${file}`;
 }
 

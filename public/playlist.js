@@ -35,7 +35,8 @@ const els = {
   playlistFilter: $('#playlistFilter'), refreshPlaylists: $('#refreshPlaylists'), newPlaylist: $('#newPlaylist'),
   activeName: $('#activeName'), dirty: $('#dirty'), trackCount: $('#trackCount'), totalTime: $('#totalTime'),
   trackList: $('#trackList'), emptyState: $('#emptyState'), loadPlay: $('#loadPlay'), saveChanges: $('#saveChanges'),
-  addFiles: $('#addFiles'), addStream: $('#addStream'), editTrack: $('#editTrack'), removeTrack: $('#removeTrack'),
+  ytProgress: $('#ytProgress'),
+  addFiles: $('#addFiles'), addStream: $('#addStream'), addYoutube: $('#addYoutube'), editTrack: $('#editTrack'), removeTrack: $('#removeTrack'),
   moveUp: $('#moveUp'), moveDown: $('#moveDown'), sortTracks: $('#sortTracks'), exportM3U: $('#exportM3U'),
   deletePlaylist: $('#deletePlaylist'),
   modal: $('#modal'), modalTitle: $('#modalTitle'), modalBody: $('#modalBody'), modalClose: $('#modalClose'), contextMenu: $('#contextMenu'), trackTable: $('.tracktable'),
@@ -53,6 +54,7 @@ let tracks = [];
 let selected = -1;
 let dirty = false;
 let addingPaths = false;
+let ytJobs = new Map(); // videoId -> { status: 'queued'|'downloading'|'error', playlist, title, error }
 let liveState = null;
 let dragFrom = -1;
 let toastTimer = null;
@@ -93,7 +95,7 @@ function trackKey(track) {
 function mediaApiUrl(endpoint, track) {
   const params = new URLSearchParams({
     file: track.file,
-    storage: track.storage === 'playlist' ? 'playlist' : track.storage === 'path' ? 'path' : 'library'
+    storage: track.storage === 'playlist' ? 'playlist' : track.storage === 'path' ? 'path' : track.storage === 'youtube' ? 'youtube' : 'library'
   });
   if (track.storage === 'playlist' && track.playlist) params.set('playlist', track.playlist);
   if (track.storage === 'path' && track.sourceId) params.set('source', track.sourceId);
@@ -197,6 +199,7 @@ function setControls() {
   els.loadPlay.disabled = !hasPlaylist || !tracks.length;
   els.addFiles.disabled = !hasPlaylist || addingPaths;
   els.addStream.disabled = !hasPlaylist;
+  els.addYoutube.disabled = !hasPlaylist;
   els.deletePlaylist.disabled = !hasPlaylist;
   els.sortTracks.disabled = !hasPlaylist || tracks.length < 2;
   els.exportM3U.disabled = !hasPlaylist || !tracks.length;
@@ -256,17 +259,23 @@ function renderTracks() {
     const isCurrent = (livePlaylist === currentName && liveState?.idx === index) ||
       (!!liveState?.trackKey && liveState.trackKey === trackKey(track));
     item.classList.toggle('current', isCurrent);
+    const ytJob = track.storage === 'youtube' ? ytJobs.get(track.videoId) : null;
+    const kindClass = track.storage === 'radio' ? ' radio'
+      : track.storage === 'youtube' ? ` youtube${ytJob?.status === 'error' ? ' error' : ytJob ? ' pending' : ''}` : '';
     item.innerHTML = `
       <span class="trackname"><strong></strong><small></small></span>
       <span class="album"></span>
-      <span class="kind${track.storage === 'radio' ? ' radio' : ''}"></span>
+      <span class="kind${kindClass}"></span>
       <span class="duration"></span>`;
     item.querySelector('.trackname strong').textContent = track.title || 'Unknown track';
     item.querySelector('.trackname small').textContent = track.artist || 'Unknown artist';
     item.querySelector('.album').textContent = track.album || '—';
-    item.querySelector('.kind').textContent = track.storage === 'radio' ? 'RADIO' : (track.originalFile?.split('.').pop() || track.file?.split('.').pop() || 'AUDIO').toUpperCase();
+    item.querySelector('.kind').textContent = track.storage === 'radio' ? 'RADIO'
+      : track.storage === 'youtube' ? (ytJob?.status === 'downloading' ? 'DOWNLOADING' : ytJob?.status === 'queued' ? 'QUEUED' : ytJob?.status === 'error' ? 'FAILED' : 'YOUTUBE')
+      : (track.originalFile?.split('.').pop() || track.file?.split('.').pop() || 'AUDIO').toUpperCase();
     item.querySelector('.duration').textContent = track.storage === 'radio' ? 'LIVE' : fmtTime(track.duration);
     if (track.storage === 'path') item.title = track.file;
+    if (track.storage === 'youtube') item.title = track.sourceUrl || '';
     item.addEventListener('click', () => {
       const now = Date.now();
       const twice = lastTrackClick === index && now - lastTrackClickAt < 400;
@@ -596,6 +605,49 @@ function streamDialog() {
   body.querySelector('#streamName').focus();
 }
 
+function youtubeDialog() {
+  if (!currentName) return;
+  const body = openModal('ADD YOUTUBE AUDIO', `
+    <div class="formgrid">
+      <label class="field full">VIDEO OR PLAYLIST URL<input id="ytUrl" type="url" placeholder="https://www.youtube.com/watch?v=… or …/playlist?list=…" autocomplete="off"></label>
+    </div>
+    <div class="modalactions"><button class="button primary" id="saveYoutube">ADD TO PLAYLIST</button></div>
+    <div class="microcopy">AUDIO ONLY, NO VIDEO · A SINGLE VIDEO DOWNLOADS RIGHT AWAY · A PLAYLIST URL QUEUES ALL ITS TRACKS TO DOWNLOAD IN THE BACKGROUND</div>`);
+  const button = body.querySelector('#saveYoutube');
+  const input = body.querySelector('#ytUrl');
+  const submit = async () => {
+    const url = input.value.trim();
+    if (!url) { toast('PASTE A YOUTUBE URL', true); return; }
+    button.disabled = true;
+    toast('RESOLVING YOUTUBE URL…');
+    try {
+      const result = await api(`/api/playlists/${encodeURIComponent(currentName)}/youtube`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url })
+      });
+      tracks = Array.isArray(result.tracks) ? result.tracks : tracks;
+      selected = Math.max(0, tracks.length - (result.added?.length || 1));
+      setDirty(false);
+      if (result.queued) {
+        for (const stub of result.added || []) ytJobs.set(stub.videoId, { status: 'queued', playlist: currentName, title: stub.title });
+        renderYtProgress();
+      }
+      renderTracks();
+      await refreshPlaylists();
+      closeModal();
+      toast(result.queued
+        ? `${result.added.length} TRACK${result.added.length === 1 ? '' : 'S'} QUEUED — DOWNLOADING IN BACKGROUND`
+        : 'TRACK ADDED — READY TO PLAY');
+    } catch (error) {
+      toast('YOUTUBE ADD FAILED: ' + error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  };
+  button.addEventListener('click', submit);
+  input.addEventListener('keydown', (event) => { if (event.key === 'Enter') submit(); });
+  input.focus();
+}
+
 function editRadioDialog(index = selected) {
   const track = tracks[index];
   if (!track || track.storage !== 'radio') return;
@@ -763,7 +815,7 @@ function downloadM3U(name, playlistTracks) {
   const lines = ['#EXTM3U'];
   for (const track of playlistTracks) {
     lines.push(`#EXTINF:${track.duration || -1},${trackLabel(track)}`);
-    lines.push(track.storage === 'radio' ? track.url : (track.originalFile || track.file));
+    lines.push(track.storage === 'radio' ? track.url : track.storage === 'youtube' ? (track.sourceUrl || track.file) : (track.originalFile || track.file));
   }
   const blob = new Blob([lines.join('\n') + '\n'], { type: 'audio/x-mpegurl;charset=utf-8' });
   const link = document.createElement('a');
@@ -831,12 +883,16 @@ function showTrackContext(event, index) {
   const track = tracks[index];
   if (!track) return;
   const radio = track.storage === 'radio';
+  const youtube = track.storage === 'youtube';
   const items = [
     { icon: '▶', label: 'Play now', hint: String(index + 1).padStart(2, '0'), action: () => activateTrack(index) },
     ...(radio ? [
       { icon: '↻', label: 'Reconnect stream', action: () => activateTrack(index) },
       { icon: '✎', label: 'Edit radio station', action: () => editRadioDialog(index) },
       { icon: '⧉', label: 'Copy stream URL', action: () => copyText(track.url || '', 'STREAM URL COPIED') }
+    ] : youtube ? [
+      { icon: '✎', label: 'Edit metadata + artwork', action: () => metadataDialog() },
+      { icon: '⧉', label: 'Copy YouTube URL', action: () => copyText(track.sourceUrl || '', 'YOUTUBE URL COPIED') }
     ] : [
       { icon: '✎', label: 'Edit metadata + artwork', action: () => metadataDialog() }
     ]),
@@ -847,13 +903,14 @@ function showTrackContext(event, index) {
     null,
     { icon: '✕', label: 'Remove from playlist', danger: true, action: () => removeTrackAt(index) }
   ];
-  showContextMenu(event.clientX, event.clientY, `${radio ? 'RADIO' : 'TRACK'} ${String(index + 1).padStart(2, '0')} // ${track.title || 'UNKNOWN'}`, items);
+  showContextMenu(event.clientX, event.clientY, `${radio ? 'RADIO' : youtube ? 'YOUTUBE' : 'TRACK'} ${String(index + 1).padStart(2, '0')} // ${track.title || 'UNKNOWN'}`, items);
 }
 
 function showPlaylistSpaceContext(event) {
   const items = currentName ? [
     { icon: '+', label: 'Add file paths', action: selectLocalFiles },
     { icon: '◉', label: 'Add radio stream', action: streamDialog },
+    { icon: '▶', label: 'Add YouTube audio', action: youtubeDialog },
     null,
     { icon: '▶', label: 'Load + play playlist', disabled: !tracks.length, action: () => activateTrack(selected >= 0 ? selected : 0) },
     { icon: '✓', label: 'Save changes', hint: dirty ? 'UNSAVED' : '', disabled: !dirty, action: () => savePlaylist() },
@@ -1089,6 +1146,8 @@ function connectWebSocket() {
     } else if (message.type === 'cmd' && message.cmd === 'rename-playlist') {
       updateRenamedReferences(message.from, message.to);
       refreshPlaylists(currentName);
+    } else if (message.type === 'youtube') {
+      handleYoutubeEvent(message);
     }
   });
   socket.addEventListener('close', () => {
@@ -1097,6 +1156,36 @@ function connectWebSocket() {
     setTimeout(connectWebSocket, 3000);
   });
   socket.addEventListener('error', () => { try { socket.close(); } catch {} });
+}
+
+function renderYtProgress() {
+  const jobs = [...ytJobs.values()];
+  const downloading = jobs.find((j) => j.status === 'downloading');
+  const queuedCount = jobs.filter((j) => j.status === 'queued').length;
+  const failedCount = jobs.filter((j) => j.status === 'error').length;
+  if (!downloading && !queuedCount && !failedCount) {
+    els.ytProgress.classList.add('hidden');
+    return;
+  }
+  const parts = [];
+  if (downloading) parts.push(`⬇ DOWNLOADING: ${(downloading.title || 'UNTITLED').toUpperCase()}`);
+  if (queuedCount) parts.push(`${queuedCount} QUEUED`);
+  if (failedCount) parts.push(`${failedCount} FAILED`);
+  els.ytProgress.textContent = parts.join('  ·  ');
+  els.ytProgress.classList.remove('hidden');
+}
+
+function handleYoutubeEvent(message) {
+  const { event, videoId, playlist, title, error } = message;
+  if (event === 'ready') ytJobs.delete(videoId);
+  else ytJobs.set(videoId, { status: event, playlist, title, error });
+  renderYtProgress();
+  if (playlist !== currentName) return;
+  renderTracks();
+  const track = tracks.find((t) => t.storage === 'youtube' && t.videoId === videoId);
+  if (!track) return;
+  if (event === 'ready') toast(`DOWNLOADED: ${trackLabel(track).toUpperCase()}`);
+  else if (event === 'error') toast(`YOUTUBE DOWNLOAD FAILED: ${trackLabel(track).toUpperCase()}`, true);
 }
 
 function paintLiveState() {
@@ -1132,6 +1221,7 @@ els.deletePlaylist.addEventListener('click', deleteCurrentPlaylist);
 els.loadPlay.addEventListener('click', () => activateTrack(selected >= 0 ? selected : 0));
 els.addFiles.addEventListener('click', selectLocalFiles);
 els.addStream.addEventListener('click', streamDialog);
+els.addYoutube.addEventListener('click', youtubeDialog);
 els.editTrack.addEventListener('click', metadataDialog);
 els.removeTrack.addEventListener('click', () => removeTrackAt(selected));
 els.moveUp.addEventListener('click', () => moveTrack(selected, selected - 1));
@@ -1181,6 +1271,12 @@ async function boot() {
     renderTracks();
     requestAnimationFrame(() => els.trackList.querySelector(`li[data-index="${requestedTrack}"]`)?.scrollIntoView({ block: 'center' }));
   }
+  try {
+    const queue = await api('/api/youtube/queue');
+    ytJobs = new Map((queue.jobs || []).map((job) => [job.videoId, job]));
+    renderYtProgress();
+    renderTracks();
+  } catch { /* background downloads just won't show progress until the next /ws event */ }
   connectWebSocket();
 }
 

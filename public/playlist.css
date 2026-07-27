@@ -151,6 +151,7 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 .dirty { padding: 3px 5px; border: 1px solid var(--amber); color: var(--amber); font-size: 7px; letter-spacing: 1px; }
 .stats { display: flex; gap: 13px; color: var(--dim); font: 9px 'Share Tech Mono', monospace; }
 .mainactions { margin-left: auto; display: flex; gap: 7px; }
+.ytprogress { margin: 0 16px 10px; padding: 6px 10px; border: 1px solid var(--amber); background: rgba(255,178,77,.08); color: var(--amber); font: 9px 'Share Tech Mono', monospace; letter-spacing: .6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toolbar { padding: 0 16px 10px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
 .select { min-height: 29px; border: 1px solid var(--line2); background: var(--inset); color: var(--dim); padding: 4px 7px; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
@@ -170,6 +171,9 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 .trackname strong { overflow: hidden; text-overflow: ellipsis; font-size: 12px; letter-spacing: .3px; }
 .trackname small, .album, .kind, .duration { color: var(--dim); font-size: 9px; }
 .kind.radio { color: var(--mag); }
+.kind.youtube { color: var(--cyan); }
+.kind.youtube.pending { color: var(--amber); }
+.kind.youtube.error { color: var(--danger); }
 .duration { font-family: 'Share Tech Mono', monospace; text-align: right; }
 .empty { position: absolute; inset: 29px 0 0; display: grid; place-content: center; justify-items: center; gap: 7px; color: var(--dim); text-align: center; }
 .emptyicon { color: var(--cyan); font-size: 28px; text-shadow: 0 0 10px rgba(33,230,193,.5); }

@@ -286,12 +286,13 @@ function trackUrl(t) {
     return `/playlist-media/${encodeURIComponent(t.playlist)}/${encodedTrackPath(t.file)}`;
   }
   if (t.storage === 'path' && t.sourceId) return `/path-media/${encodeURIComponent(t.sourceId)}`;
+  if (t.storage === 'youtube') return `/youtube-media/${encodedTrackPath(t.file)}`;
   return '/music/' + encodedTrackPath(t.file);
 }
 function mediaApiUrl(endpoint, t) {
   const q = new URLSearchParams({
     file: t.file,
-    storage: t.storage === 'playlist' ? 'playlist' : t.storage === 'path' ? 'path' : 'library'
+    storage: t.storage === 'playlist' ? 'playlist' : t.storage === 'path' ? 'path' : t.storage === 'youtube' ? 'youtube' : 'library'
   });
   if (t.storage === 'playlist' && t.playlist) q.set('playlist', t.playlist);
   if (t.storage === 'path' && t.sourceId) q.set('source', t.sourceId);
@@ -1013,6 +1014,7 @@ function addTrack(t, andPlay = false) {
     ...(t.storage === 'radio' ? {
       stationId: t.stationId || t.file, url: t.url || '', homepage: t.homepage || ''
     } : {}),
+    ...(t.storage === 'youtube' ? { videoId: t.videoId || '', sourceUrl: t.sourceUrl || '' } : {}),
     ...(t.playlist ? { playlist: t.playlist } : {}),
     ...(t.sourceId ? { sourceId: t.sourceId } : {}),
     ...(t.originalFile ? { originalFile: t.originalFile } : {})
@@ -1232,7 +1234,7 @@ function buildM3U(tracks) {
   const lines = ['#EXTM3U'];
   for (const t of tracks) {
     lines.push(`#EXTINF:${t.duration || -1},${trackLabel(t)}`);
-    lines.push(t.storage === 'radio' ? t.url : (t.originalFile || t.file));
+    lines.push(t.storage === 'radio' ? t.url : t.storage === 'youtube' ? (t.sourceUrl || t.file) : (t.originalFile || t.file));
   }
   return lines.join('\n') + '\n';
 }
@@ -1274,6 +1276,7 @@ function showQueueTrackContext(event, index) {
   if (!track) return;
   const radio = track.storage === 'radio';
   const filepath = track.storage === 'path';
+  const youtube = track.storage === 'youtube';
   showDeckContextMenu(event.clientX, event.clientY, `TRACK ${String(index + 1).padStart(2, '0')} // ${track.title || 'UNKNOWN'}`, [
     { icon: '▶', label: 'Play now', hint: index === cur ? 'CURRENT' : '', action: () => playIndex(index) },
     { icon: '↗', label: 'Open in playlist manager', disabled: !currentName, action: () => openPlaylistManager(index) },
@@ -1282,6 +1285,8 @@ function showQueueTrackContext(event, index) {
       { icon: '⧉', label: 'Copy stream URL', action: () => copyDeckText(track.url || '', 'STREAM URL COPIED') }
     ] : filepath ? [
       { icon: '⧉', label: 'Copy source filepath', action: () => copyDeckText(track.file || '', 'SOURCE FILEPATH COPIED') }
+    ] : youtube ? [
+      { icon: '⧉', label: 'Copy YouTube URL', action: () => copyDeckText(track.sourceUrl || '', 'YOUTUBE URL COPIED') }
     ] : []),
     null,
     { icon: '↑', label: 'Move up', disabled: index <= 0, action: () => moveTrack(index, index - 1) },
