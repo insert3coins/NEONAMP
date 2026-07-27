@@ -13,7 +13,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { Transform } from 'node:stream';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { parseFile, selectCover } from 'music-metadata';
 import { WebSocketServer, WebSocket } from 'ws';
 
@@ -440,20 +440,58 @@ function resolveYoutube(url) {
   });
 }
 
-async function downloadYoutubeAudio(videoId) {
+// One line per progress tick, in a format cheap to parse: raw byte counts,
+// not yt-dlp's human-formatted strings. total_bytes is empty ("NA") until
+// yt-dlp knows the real size, in which case total_bytes_estimate fills in.
+const YT_PROGRESS_TEMPLATE =
+  'download:NEONAMP-PROGRESS %(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s';
+const YT_PROGRESS_RE = /^NEONAMP-PROGRESS (\d+|NA)\|(\d+|NA)\|(\d+|NA)$/;
+
+async function downloadYoutubeAudio(videoId, onProgress) {
   const dest = path.join(YOUTUBE_DIR, `${videoId}.m4a`);
   try { await fs.access(dest); return; } catch { /* not cached yet */ }
   const ffDir = await ffmpegDir();
   const args = [
     '-f', 'bestaudio/best', '-x', '--audio-format', 'm4a', '--audio-quality', '0',
-    '--embed-thumbnail', '--embed-metadata', '--no-playlist', '--no-warnings', '--no-progress',
+    '--embed-thumbnail', '--embed-metadata', '--no-playlist', '--no-warnings',
+    '--newline', '--progress-template', YT_PROGRESS_TEMPLATE,
     ...(ffDir ? ['--ffmpeg-location', ffDir] : []),
     '-o', path.join(YOUTUBE_DIR, '%(id)s.%(ext)s'),
     `https://www.youtube.com/watch?v=${videoId}`
   ];
   return new Promise((resolve, reject) => {
-    execFile('yt-dlp', args, { timeout: 6 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 }, (err, _stdout, stderr) => {
-      if (err) return reject(new Error(lastErrorLine(stderr) || err.message));
+    // Without a TTY, Python's stdout is block-buffered by default — progress
+    // lines would all arrive in one burst at exit instead of streaming.
+    // PYTHONUNBUFFERED forces line-by-line flushing so onProgress fires live.
+    const child = spawn('yt-dlp', args, { windowsHide: true, env: { ...process.env, PYTHONUNBUFFERED: '1' } });
+    let stderr = '';
+    let buf = '';
+    let lastPercent = -1;
+    // Runs off the background queue, not a blocking request, so a generous
+    // ceiling costs nothing — long mixes/DJ sets are a real use case here.
+    const timer = setTimeout(() => child.kill(), 30 * 60 * 1000);
+    child.stdout.on('data', (chunk) => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        const m = YT_PROGRESS_RE.exec(line);
+        if (!m) continue;
+        const downloaded = Number(m[1]);
+        const total = m[2] !== 'NA' ? Number(m[2]) : (m[3] !== 'NA' ? Number(m[3]) : 0);
+        const percent = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
+        if (percent !== null && percent !== lastPercent) {
+          lastPercent = percent;
+          onProgress?.(percent);
+        }
+      }
+    });
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-4000); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(lastErrorLine(stderr) || `yt-dlp exited with code ${code}`));
       fs.access(dest).then(resolve, () => reject(new Error('Download finished but the output file is missing')));
     });
   });
@@ -483,7 +521,7 @@ function broadcastYoutube(event, job, error) {
   const remaining = ytQueue.length + (ytBusy ? 1 : 0);
   const data = JSON.stringify({
     type: 'youtube', event, videoId: job.videoId, playlist: job.playlist, title: job.title,
-    remaining, ...(error ? { error } : {})
+    percent: Number.isFinite(job.percent) ? job.percent : null, remaining, ...(error ? { error } : {})
   });
   for (const c of wssRef.clients) {
     if (c.readyState === WebSocket.OPEN) { try { c.send(data); } catch { /* ignore */ } }
@@ -498,7 +536,10 @@ async function pumpYoutube() {
   job.status = 'downloading';
   broadcastYoutube('downloading', job);
   try {
-    await downloadYoutubeAudio(job.videoId);
+    await downloadYoutubeAudio(job.videoId, (percent) => {
+      job.percent = percent;
+      broadcastYoutube('progress', job);
+    });
     enqueueLoudness(trackRef({ storage: 'youtube', file: `${job.videoId}.m4a` }), true);
     job.status = 'ready';
   } catch (err) {
@@ -1456,27 +1497,23 @@ app.post('/api/playlists/:name/youtube', async (req, res) => {
   }
   if (existing.length + stubs.length > 5000) return res.status(409).json({ error: 'A playlist can contain at most 5000 tracks' });
 
-  if (!isPlaylist) {
-    try { await downloadYoutubeAudio(stubs[0].videoId); }
-    catch (err) { return res.status(502).json({ error: `Download failed: ${err.message}` }); }
-    enqueueLoudness(trackRef(stubs[0]), true);
-  }
-
   const next = { ...data, version: 2, name, saved: new Date().toISOString(), tracks: [...existing, ...stubs] };
   await writeJsonFile(playlistFile, next);
   const playlist = exposedPlaylist(next, name);
 
-  if (isPlaylist) {
-    for (const stub of stubs) enqueueYoutube(stub.videoId, name, stub.title);
-  }
+  // Always queue — never block this request on the actual download. A
+  // "short song, ready the instant the dialog closes" fast path sounds
+  // nice until someone adds a multi-hour mix: the request (and the modal)
+  // would hang for as long as the download takes, with no progress shown.
+  for (const stub of stubs) enqueueYoutube(stub.videoId, name, stub.title);
 
-  res.json({ ok: true, name, count: playlist.tracks.length, added: stubs, queued: isPlaylist, tracks: playlist.tracks });
+  res.json({ ok: true, name, count: playlist.tracks.length, added: stubs, queued: true, tracks: playlist.tracks });
 });
 
 // Snapshot of in-flight downloads, so a (re)loaded playlist manager can show
 // current progress immediately instead of waiting on the next /ws event.
 app.get('/api/youtube/queue', (req, res) => {
-  res.json({ jobs: [...ytJobs.values()].map(({ videoId, playlist, title, status, error }) => ({ videoId, playlist, title, status, error })) });
+  res.json({ jobs: [...ytJobs.values()].map(({ videoId, playlist, title, status, error, percent }) => ({ videoId, playlist, title, status, error, percent })) });
 });
 
 async function unusedPlaylistUploadName(dir, name) {

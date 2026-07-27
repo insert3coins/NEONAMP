@@ -195,14 +195,17 @@ selected playlist. NEONAMP extracts audio only — via `yt-dlp` and
 ffmpeg — into `youtube-cache/` and never touches or displays video; the
 result plays through the same deck, EQ, DSP, and normalization pipeline
 as any other track, with title, artist, duration, and thumbnail read
-straight from the downloaded file's embedded tags. A single video URL
-downloads immediately, ready to play as soon as the dialog closes; a
-playlist URL is resolved instantly and its tracks queue for background
-download one at a time. Progress is visible two ways: an amber status
-strip above the toolbar (`⬇ DOWNLOADING: <title> · N QUEUED · N
+straight from the downloaded file's embedded tags. The URL resolves
+immediately (so the dialog closes right away) and every track — a
+single video or a whole playlist — downloads in the background, one
+at a time; nothing blocks on the download itself, so adding a
+multi-hour mix is exactly as responsive as adding a three-minute
+song. Progress is visible two ways: an amber status
+strip above the toolbar (`⬇ DOWNLOADING: <title> 42% · N QUEUED · N
 FAILED`) and each queued track's TYPE column, which reads QUEUED /
-DOWNLOADING / FAILED until the file lands and reverts to YOUTUBE.
-Both are driven live over `/ws`, and a (re)loaded playlist manager
+DOWNLOADING 42% / FAILED until the file lands and reverts to YOUTUBE.
+The percentage is real byte-level download progress from `yt-dlp`,
+not a guess. Both are driven live over `/ws`, and a (re)loaded playlist manager
 fetches current progress on load too, so reopening the page mid-batch
 still shows where things stand. Deleting a playlist also reclaims its
 `youtube-cache/` audio, unless another saved playlist still uses the

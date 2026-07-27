@@ -271,7 +271,7 @@ function renderTracks() {
     item.querySelector('.trackname small').textContent = track.artist || 'Unknown artist';
     item.querySelector('.album').textContent = track.album || '—';
     item.querySelector('.kind').textContent = track.storage === 'radio' ? 'RADIO'
-      : track.storage === 'youtube' ? (ytJob?.status === 'downloading' ? 'DOWNLOADING' : ytJob?.status === 'queued' ? 'QUEUED' : ytJob?.status === 'error' ? 'FAILED' : 'YOUTUBE')
+      : track.storage === 'youtube' ? youtubeKindText(ytJob)
       : (track.originalFile?.split('.').pop() || track.file?.split('.').pop() || 'AUDIO').toUpperCase();
     item.querySelector('.duration').textContent = track.storage === 'radio' ? 'LIVE' : fmtTime(track.duration);
     if (track.storage === 'path') item.title = track.file;
@@ -612,7 +612,7 @@ function youtubeDialog() {
       <label class="field full">VIDEO OR PLAYLIST URL<input id="ytUrl" type="url" placeholder="https://www.youtube.com/watch?v=… or …/playlist?list=…" autocomplete="off"></label>
     </div>
     <div class="modalactions"><button class="button primary" id="saveYoutube">ADD TO PLAYLIST</button></div>
-    <div class="microcopy">AUDIO ONLY, NO VIDEO · A SINGLE VIDEO DOWNLOADS RIGHT AWAY · A PLAYLIST URL QUEUES ALL ITS TRACKS TO DOWNLOAD IN THE BACKGROUND</div>`);
+    <div class="microcopy">AUDIO ONLY, NO VIDEO · TRACKS DOWNLOAD IN THE BACKGROUND — WATCH PROGRESS ABOVE THE TOOLBAR · THIS CLOSES AS SOON AS THE URL RESOLVES, NOT WHEN THE DOWNLOAD FINISHES</div>`);
   const button = body.querySelector('#saveYoutube');
   const input = body.querySelector('#ytUrl');
   const submit = async () => {
@@ -633,13 +633,11 @@ function youtubeDialog() {
       // this handler back to the browser. Writing 'queued' after that would
       // stomp a correct, already-resolved state. Rely on the /ws push (and
       // the reconcileYoutubeQueue() safety net) as the single writer instead.
-      if (result.queued) reconcileYoutubeQueue();
+      reconcileYoutubeQueue();
       renderTracks();
       await refreshPlaylists();
       closeModal();
-      toast(result.queued
-        ? `${result.added.length} TRACK${result.added.length === 1 ? '' : 'S'} QUEUED — DOWNLOADING IN BACKGROUND`
-        : 'TRACK ADDED — READY TO PLAY');
+      toast(`${result.added.length} TRACK${result.added.length === 1 ? '' : 'S'} QUEUED — DOWNLOADING IN BACKGROUND`);
     } catch (error) {
       toast('YOUTUBE ADD FAILED: ' + error.message, true);
     } finally {
@@ -1172,19 +1170,49 @@ function renderYtProgress() {
     return;
   }
   const parts = [];
-  if (downloading) parts.push(`⬇ DOWNLOADING: ${(downloading.title || 'UNTITLED').toUpperCase()}`);
+  if (downloading) {
+    const pct = Number.isFinite(downloading.percent) ? ` ${downloading.percent}%` : '';
+    parts.push(`⬇ DOWNLOADING: ${(downloading.title || 'UNTITLED').toUpperCase()}${pct}`);
+  }
   if (queuedCount) parts.push(`${queuedCount} QUEUED`);
   if (failedCount) parts.push(`${failedCount} FAILED`);
   els.ytProgress.textContent = parts.join('  ·  ');
   els.ytProgress.classList.remove('hidden');
 }
 
+function youtubeKindText(job) {
+  if (!job) return 'YOUTUBE';
+  if (job.status === 'downloading') return `DOWNLOADING${Number.isFinite(job.percent) ? ` ${job.percent}%` : ''}`;
+  if (job.status === 'queued') return 'QUEUED';
+  if (job.status === 'error') return 'FAILED';
+  return 'YOUTUBE';
+}
+
+// A percent tick fires up to ~100 times over one download. Patching just
+// the affected row's badge text (instead of a full renderTracks()) keeps
+// that smooth instead of rebuilding the whole list on every tick.
+function updateYoutubeRowBadge(videoId) {
+  const index = tracks.findIndex((t) => t.storage === 'youtube' && t.videoId === videoId);
+  if (index < 0) return;
+  const kind = els.trackList.querySelector(`li[data-index="${index}"] .kind`);
+  if (kind) kind.textContent = youtubeKindText(ytJobs.get(videoId));
+}
+
 function handleYoutubeEvent(message) {
-  const { event, videoId, playlist, title, error } = message;
-  if (event === 'ready') ytJobs.delete(videoId);
-  else ytJobs.set(videoId, { status: event, playlist, title, error });
+  const { event, videoId, playlist, title, error, percent } = message;
+  if (event === 'ready') {
+    ytJobs.delete(videoId);
+  } else if (event === 'progress') {
+    // A progress tick doesn't carry a status of its own — it's always
+    // mid-download — so patch the percent onto whatever's already there
+    // rather than replacing the job.
+    ytJobs.set(videoId, { ...(ytJobs.get(videoId) || { status: 'downloading', playlist, title }), percent });
+  } else {
+    ytJobs.set(videoId, { status: event, playlist, title, error });
+  }
   renderYtProgress();
   if (playlist !== currentName) return;
+  if (event === 'progress') { updateYoutubeRowBadge(videoId); return; }
   renderTracks();
   const track = tracks.find((t) => t.storage === 'youtube' && t.videoId === videoId);
   if (!track) return;
