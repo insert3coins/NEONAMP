@@ -1286,7 +1286,7 @@ function showQueueTrackContext(event, index) {
     ] : filepath ? [
       { icon: '⧉', label: 'Copy source filepath', action: () => copyDeckText(track.file || '', 'SOURCE FILEPATH COPIED') }
     ] : youtube ? [
-      { icon: '⧉', label: 'Copy YouTube URL', action: () => copyDeckText(track.sourceUrl || '', 'YOUTUBE URL COPIED') }
+      { icon: '⧉', label: 'Copy source URL', action: () => copyDeckText(track.sourceUrl || '', 'SOURCE URL COPIED') }
     ] : []),
     null,
     { icon: '↑', label: 'Move up', disabled: index <= 0, action: () => moveTrack(index, index - 1) },

@@ -188,36 +188,51 @@ metadata, and displays the live `StreamTitle`, bitrate, connection
 state, and reconnect countdown. Dropped connections retry with
 bounded backoff in both the deck and OBS jukebox.
 
-## YouTube audio import
+## Audio import (YouTube, SoundCloud, Mixcloud, Bandcamp)
 
-Use **＋ YOUTUBE** on `/playlist` to add a video or playlist URL to the
-selected playlist. NEONAMP extracts audio only — via `yt-dlp` and
-ffmpeg — into `youtube-cache/` and never touches or displays video; the
-result plays through the same deck, EQ, DSP, and normalization pipeline
-as any other track, with title, artist, duration, and thumbnail read
-straight from the downloaded file's embedded tags. The URL resolves
-immediately (so the dialog closes right away) and every track — a
-single video or a whole playlist — downloads in the background, one
-at a time; nothing blocks on the download itself, so adding a
-multi-hour mix is exactly as responsive as adding a three-minute
-song. Downloading is a two-step pipeline — `yt-dlp` fetches the raw
-audio and thumbnail, then NEONAMP's own ffmpeg call transcodes,
-tags, and embeds the cover art — because yt-dlp doesn't expose
-progress for its own internal ffmpeg step. Both steps report a real
-percentage (byte-level while downloading, `-progress`-driven while
-converting), visible two ways: an amber status strip above the
+Use **＋ IMPORT AUDIO** on `/playlist` to add a track/video or a whole
+playlist/set/album URL to the selected playlist — YouTube, SoundCloud,
+and Mixcloud URLs are accepted, plus any `*.bandcamp.com` link. Only
+YouTube and SoundCloud have actually been exercised end-to-end;
+Mixcloud and Bandcamp ride the same generic `yt-dlp` extraction path
+and should work, but haven't been individually verified. NEONAMP
+extracts audio only into `youtube-cache/` and never touches or
+displays video; the result plays through the same deck, EQ, DSP, and
+normalization pipeline as any other track, with title, artist,
+duration, and thumbnail read straight from the downloaded file's
+embedded tags. The TYPE column reflects the real source (YOUTUBE /
+SOUNDCLOUD / MIXCLOUD / BANDCAMP) rather than a generic label. The URL
+resolves immediately (so the dialog closes right away) and every
+track — a single item or a whole playlist — downloads in the
+background, one at a time; nothing blocks on the download itself, so
+adding a multi-hour mix is exactly as responsive as adding a
+three-minute song. Downloading is a two-step pipeline — `yt-dlp`
+fetches the raw audio and thumbnail, then NEONAMP's own ffmpeg call
+transcodes, tags, and embeds the cover art — because yt-dlp doesn't
+expose progress for its own internal ffmpeg step. Both steps report a
+real percentage (byte-level while downloading, `-progress`-driven
+while converting), visible two ways: an amber status strip above the
 toolbar (`⬇ DOWNLOADING: <title> 42% · N QUEUED · N FAILED`, or `⚙
 CONVERTING: <title> 67%`) and each queued track's TYPE column, which
 reads QUEUED / DOWNLOADING 42% / CONVERTING 67% / FAILED until the
-file lands and reverts to YOUTUBE. Both are driven live over `/ws`,
+file lands and reverts to the source name. Both are driven live over `/ws`,
 and a (re)loaded playlist manager
 fetches current progress on load too, so reopening the page mid-batch
-still shows where things stand. Deleting a playlist also reclaims its
+still shows where things stand. A failed track (private/removed video,
+network blip, etc.) shows FAILED and stays that way rather than silently
+reverting — right-click it for **Retry download**, or right-click
+empty playlist space for **Retry all failed downloads** to requeue
+everything that failed at once. A playlist built from a **playlist,
+set, or album URL** (not a single track) remembers that source and
+checks it automatically every 6 hours (plus once shortly after boot)
+for items added since — handy for an ongoing series. Right-click
+empty playlist space for **Check for new videos** to trigger that
+check on demand instead of waiting. Deleting a playlist also reclaims its
 `youtube-cache/` audio, unless another saved playlist still uses the
-same video. Requires `yt-dlp` on PATH — install it separately (`pip
+same track. Requires `yt-dlp` on PATH — install it separately (`pip
 install yt-dlp` or see
 [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp)); without
-it, adding YouTube audio fails with a clear error.
+it, adding audio fails with a clear error.
 
 ## Playlist utilities
 
@@ -452,9 +467,12 @@ collapse their panels just like the original.
 - `PUT  /api/playlists/:name` — save `{ "tracks": [...] }` without copying filepath sources
 - `POST /api/files/pick` — open the server computer's native audio-file picker
 - `POST /api/playlists/:name/paths` — append `{ "paths": ["D:\\Music\\track.mp3"] }`
-- `POST /api/playlists/:name/youtube` — append `{ "url": "https://www.youtube.com/..." }` (video or playlist)
+- `POST /api/playlists/:name/youtube` — append `{ "url": "..." }` (YouTube/SoundCloud/Mixcloud/Bandcamp, track or playlist)
+- `POST /api/playlists/:name/youtube/retry` — re-queue one failed track: `{ "videoId": "..." }`
+- `POST /api/playlists/:name/youtube/resync` — check every linked source for new items now
+- `GET  /api/youtube/queue` — in-flight download jobs (status/percent/phase) for a (re)loaded manager
 - `GET  /path-media/:sourceId` — seekable playback for a registered filepath source
-- `GET  /youtube-media/:file` — seekable playback for downloaded YouTube audio
+- `GET  /youtube-media/:file` — seekable playback for downloaded audio (any import source)
 - `PUT  /api/playlists/:name/upload?name=file.mp3` — legacy direct-upload compatibility
 - `POST /api/playlists/:name/activate` — load a playlist/track into the deck and OBS jukebox
 - `POST /api/playlists/:name/rename` — rename metadata and update live players

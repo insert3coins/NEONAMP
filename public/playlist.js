@@ -55,6 +55,7 @@ let selected = -1;
 let dirty = false;
 let addingPaths = false;
 let ytJobs = new Map(); // videoId -> { status: 'queued'|'downloading'|'error', playlist, title, error }
+let youtubeSources = []; // YouTube playlist URLs the current playlist was ever built from
 let liveState = null;
 let dragFrom = -1;
 let toastTimer = null;
@@ -271,7 +272,7 @@ function renderTracks() {
     item.querySelector('.trackname small').textContent = track.artist || 'Unknown artist';
     item.querySelector('.album').textContent = track.album || '—';
     item.querySelector('.kind').textContent = track.storage === 'radio' ? 'RADIO'
-      : track.storage === 'youtube' ? youtubeKindText(ytJob)
+      : track.storage === 'youtube' ? youtubeKindText(ytJob, track)
       : (track.originalFile?.split('.').pop() || track.file?.split('.').pop() || 'AUDIO').toUpperCase();
     item.querySelector('.duration').textContent = track.storage === 'radio' ? 'LIVE' : fmtTime(track.duration);
     if (track.storage === 'path') item.title = track.file;
@@ -333,6 +334,7 @@ async function loadPlaylist(name, quiet = false) {
     const data = await api(`/api/playlists/${encodeURIComponent(name)}`);
     currentName = data.name || name;
     tracks = Array.isArray(data.tracks) ? data.tracks : [];
+    youtubeSources = Array.isArray(data.youtubeSources) ? data.youtubeSources : [];
     selected = tracks.length ? 0 : -1;
     setDirty(false);
     renderPlaylists();
@@ -607,24 +609,25 @@ function streamDialog() {
 
 function youtubeDialog() {
   if (!currentName) return;
-  const body = openModal('ADD YOUTUBE AUDIO', `
+  const body = openModal('ADD AUDIO FROM URL', `
     <div class="formgrid">
-      <label class="field full">VIDEO OR PLAYLIST URL<input id="ytUrl" type="url" placeholder="https://www.youtube.com/watch?v=… or …/playlist?list=…" autocomplete="off"></label>
+      <label class="field full">TRACK, VIDEO, OR PLAYLIST/SET URL<input id="ytUrl" type="url" placeholder="YouTube, SoundCloud, Mixcloud, or Bandcamp URL…" autocomplete="off"></label>
     </div>
     <div class="modalactions"><button class="button primary" id="saveYoutube">ADD TO PLAYLIST</button></div>
-    <div class="microcopy">AUDIO ONLY, NO VIDEO · TRACKS DOWNLOAD IN THE BACKGROUND — WATCH PROGRESS ABOVE THE TOOLBAR · THIS CLOSES AS SOON AS THE URL RESOLVES, NOT WHEN THE DOWNLOAD FINISHES</div>`);
+    <div class="microcopy">YOUTUBE, SOUNDCLOUD, MIXCLOUD, OR BANDCAMP · AUDIO ONLY, NO VIDEO · TRACKS DOWNLOAD IN THE BACKGROUND — WATCH PROGRESS ABOVE THE TOOLBAR · THIS CLOSES AS SOON AS THE URL RESOLVES, NOT WHEN THE DOWNLOAD FINISHES</div>`);
   const button = body.querySelector('#saveYoutube');
   const input = body.querySelector('#ytUrl');
   const submit = async () => {
     const url = input.value.trim();
-    if (!url) { toast('PASTE A YOUTUBE URL', true); return; }
+    if (!url) { toast('PASTE A URL', true); return; }
     button.disabled = true;
-    toast('RESOLVING YOUTUBE URL…');
+    toast('RESOLVING URL…');
     try {
       const result = await api(`/api/playlists/${encodeURIComponent(currentName)}/youtube`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url })
       });
       tracks = Array.isArray(result.tracks) ? result.tracks : tracks;
+      youtubeSources = Array.isArray(result.youtubeSources) ? result.youtubeSources : youtubeSources;
       selected = Math.max(0, tracks.length - (result.added?.length || 1));
       setDirty(false);
       // Don't optimistically write 'queued' here: the server processes the
@@ -639,7 +642,7 @@ function youtubeDialog() {
       closeModal();
       toast(`${result.added.length} TRACK${result.added.length === 1 ? '' : 'S'} QUEUED — DOWNLOADING IN BACKGROUND`);
     } catch (error) {
-      toast('YOUTUBE ADD FAILED: ' + error.message, true);
+      toast('ADD FAILED: ' + error.message, true);
     } finally {
       button.disabled = false;
     }
@@ -880,11 +883,51 @@ function showPlaylistContext(event, name) {
   ]);
 }
 
+async function retryYoutubeDownload(track, { silent = false } = {}) {
+  try {
+    await api(`/api/playlists/${encodeURIComponent(currentName)}/youtube/retry`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ videoId: track.videoId })
+    });
+    if (!silent) { reconcileYoutubeQueue(); toast(`RETRYING: ${trackLabel(track).toUpperCase()}`); }
+    return true;
+  } catch (error) {
+    if (!silent) toast('RETRY FAILED: ' + error.message, true);
+    return false;
+  }
+}
+
+function failedYoutubeTracks() {
+  return tracks.filter((t) => t.storage === 'youtube' && ytJobs.get(t.videoId)?.status === 'error');
+}
+
+async function retryAllFailedYoutube() {
+  const failed = failedYoutubeTracks();
+  if (!failed.length) return;
+  const results = await Promise.all(failed.map((t) => retryYoutubeDownload(t, { silent: true })));
+  reconcileYoutubeQueue();
+  const ok = results.filter(Boolean).length;
+  toast(`RETRYING ${ok} OF ${failed.length} FAILED DOWNLOAD${failed.length === 1 ? '' : 'S'}`);
+}
+
+async function checkForNewYoutubeVideos() {
+  if (!currentName || !youtubeSources.length) return;
+  toast('CHECKING FOR NEW VIDEOS…');
+  try {
+    const result = await api(`/api/playlists/${encodeURIComponent(currentName)}/youtube/resync`, { method: 'POST' });
+    if (Array.isArray(result.tracks)) tracks = result.tracks;
+    renderTracks();
+    reconcileYoutubeQueue();
+    const count = result.added?.length || 0;
+    toast(count ? `${count} NEW VIDEO${count === 1 ? '' : 'S'} QUEUED` : 'NO NEW VIDEOS FOUND');
+  } catch (error) { toast('CHECK FAILED: ' + error.message, true); }
+}
+
 function showTrackContext(event, index) {
   const track = tracks[index];
   if (!track) return;
   const radio = track.storage === 'radio';
   const youtube = track.storage === 'youtube';
+  const ytFailed = youtube && ytJobs.get(track.videoId)?.status === 'error';
   const items = [
     { icon: '▶', label: 'Play now', hint: String(index + 1).padStart(2, '0'), action: () => activateTrack(index) },
     ...(radio ? [
@@ -892,8 +935,9 @@ function showTrackContext(event, index) {
       { icon: '✎', label: 'Edit radio station', action: () => editRadioDialog(index) },
       { icon: '⧉', label: 'Copy stream URL', action: () => copyText(track.url || '', 'STREAM URL COPIED') }
     ] : youtube ? [
+      ...(ytFailed ? [{ icon: '↻', label: 'Retry download', action: () => retryYoutubeDownload(track) }] : []),
       { icon: '✎', label: 'Edit metadata + artwork', action: () => metadataDialog() },
-      { icon: '⧉', label: 'Copy YouTube URL', action: () => copyText(track.sourceUrl || '', 'YOUTUBE URL COPIED') }
+      { icon: '⧉', label: 'Copy source URL', action: () => copyText(track.sourceUrl || '', 'SOURCE URL COPIED') }
     ] : [
       { icon: '✎', label: 'Edit metadata + artwork', action: () => metadataDialog() }
     ]),
@@ -904,14 +948,17 @@ function showTrackContext(event, index) {
     null,
     { icon: '✕', label: 'Remove from playlist', danger: true, action: () => removeTrackAt(index) }
   ];
-  showContextMenu(event.clientX, event.clientY, `${radio ? 'RADIO' : youtube ? 'YOUTUBE' : 'TRACK'} ${String(index + 1).padStart(2, '0')} // ${track.title || 'UNKNOWN'}`, items);
+  showContextMenu(event.clientX, event.clientY, `${radio ? 'RADIO' : youtube ? importSiteLabel(track) : 'TRACK'} ${String(index + 1).padStart(2, '0')} // ${track.title || 'UNKNOWN'}`, items);
 }
 
 function showPlaylistSpaceContext(event) {
+  const failedCount = currentName ? failedYoutubeTracks().length : 0;
   const items = currentName ? [
     { icon: '+', label: 'Add file paths', action: selectLocalFiles },
     { icon: '◉', label: 'Add radio stream', action: streamDialog },
-    { icon: '▶', label: 'Add YouTube audio', action: youtubeDialog },
+    { icon: '▶', label: 'Add audio from URL', action: youtubeDialog },
+    { icon: '↻', label: 'Retry all failed downloads', hint: `${failedCount} FAILED`, disabled: !failedCount, action: retryAllFailedYoutube },
+    { icon: '⟳', label: 'Check for new videos', hint: `${youtubeSources.length} SOURCE${youtubeSources.length === 1 ? '' : 'S'}`, disabled: !youtubeSources.length, action: checkForNewYoutubeVideos },
     null,
     { icon: '▶', label: 'Load + play playlist', disabled: !tracks.length, action: () => activateTrack(selected >= 0 ? selected : 0) },
     { icon: '✓', label: 'Save changes', hint: dirty ? 'UNSAVED' : '', disabled: !dirty, action: () => savePlaylist() },
@@ -1147,6 +1194,12 @@ function connectWebSocket() {
     } else if (message.type === 'cmd' && message.cmd === 'rename-playlist') {
       updateRenamedReferences(message.from, message.to);
       refreshPlaylists(currentName);
+    } else if (message.type === 'cmd' && message.cmd === 'youtube-resync') {
+      toast(`${message.added} NEW VIDEO${message.added === 1 ? '' : 'S'} FOUND IN "${message.playlist}"`);
+      // Don't force-reload over unsaved local edits — the toast already
+      // told them; they'll see the new tracks next time they open it.
+      if (message.playlist === currentName && !dirty) loadPlaylist(currentName, true);
+      else refreshPlaylists(currentName);
     } else if (message.type === 'youtube') {
       handleYoutubeEvent(message);
     }
@@ -1182,15 +1235,30 @@ function renderYtProgress() {
   els.ytProgress.classList.remove('hidden');
 }
 
-function youtubeKindText(job) {
-  if (!job) return 'YOUTUBE';
+// storage stays 'youtube' internally for every site (see server.js) so
+// existing playlists never break, but the badge should say what it
+// actually is — derived from the real source URL, not the storage tag.
+function importSiteLabel(track) {
+  try {
+    const host = new URL(track?.sourceUrl || '').hostname.replace(/^(www|m|music|on)\./, '');
+    if (host === 'youtu.be' || host.endsWith('youtube.com')) return 'YOUTUBE';
+    if (host.endsWith('soundcloud.com')) return 'SOUNDCLOUD';
+    if (host.endsWith('mixcloud.com')) return 'MIXCLOUD';
+    if (host.endsWith('bandcamp.com')) return 'BANDCAMP';
+  } catch { /* no/invalid sourceUrl */ }
+  return 'YOUTUBE';
+}
+
+function youtubeKindText(job, track) {
+  const site = importSiteLabel(track);
+  if (!job) return site;
   if (job.status === 'downloading') {
     const label = job.phase === 'converting' ? 'CONVERTING' : 'DOWNLOADING';
     return `${label}${Number.isFinite(job.percent) ? ` ${job.percent}%` : ''}`;
   }
   if (job.status === 'queued') return 'QUEUED';
   if (job.status === 'error') return 'FAILED';
-  return 'YOUTUBE';
+  return site;
 }
 
 // A percent tick fires up to ~100 times over one download. Patching just
@@ -1200,11 +1268,11 @@ function updateYoutubeRowBadge(videoId) {
   const index = tracks.findIndex((t) => t.storage === 'youtube' && t.videoId === videoId);
   if (index < 0) return;
   const kind = els.trackList.querySelector(`li[data-index="${index}"] .kind`);
-  if (kind) kind.textContent = youtubeKindText(ytJobs.get(videoId));
+  if (kind) kind.textContent = youtubeKindText(ytJobs.get(videoId), tracks[index]);
 }
 
 function handleYoutubeEvent(message) {
-  const { event, videoId, playlist, title, error, percent, phase } = message;
+  const { event, videoId, playlist, title, error, percent, phase, meta } = message;
   if (event === 'ready') {
     ytJobs.delete(videoId);
   } else if (event === 'progress') {
@@ -1218,11 +1286,19 @@ function handleYoutubeEvent(message) {
   renderYtProgress();
   if (playlist !== currentName) return;
   if (event === 'progress') { updateYoutubeRowBadge(videoId); return; }
+  if (event === 'ready' && meta) {
+    // A batch/set add only had sparse placeholder metadata for some sites —
+    // the server corrects the persisted entry post-download and sends the
+    // real values along with 'ready', so the open manager doesn't keep
+    // showing "Untitled" until the next full reload.
+    const idx = tracks.findIndex((t) => t.storage === 'youtube' && t.videoId === videoId);
+    if (idx >= 0) tracks[idx] = { ...tracks[idx], title: meta.title, artist: meta.artist, duration: meta.duration };
+  }
   renderTracks();
   const track = tracks.find((t) => t.storage === 'youtube' && t.videoId === videoId);
   if (!track) return;
   if (event === 'ready') toast(`DOWNLOADED: ${trackLabel(track).toUpperCase()}`);
-  else if (event === 'error') toast(`YOUTUBE DOWNLOAD FAILED: ${trackLabel(track).toUpperCase()}`, true);
+  else if (event === 'error') toast(`DOWNLOAD FAILED: ${trackLabel(track).toUpperCase()}`, true);
 }
 
 // The strip/badges above are driven by live /ws pushes, but a push can be

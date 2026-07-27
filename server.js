@@ -380,16 +380,24 @@ app.get('/api/radio/:id/stream', async (req, res) => {
 });
 
 // ------------------------------------------------------------
-// YouTube audio import — video/playlist URLs are resolved and the
-// audio extracted via yt-dlp (+ffmpeg) into ./youtube-cache, tagged
-// and thumbnailed on the way in so the existing metadata/art/loudness
-// pipeline picks them up exactly like any other library file. Single
-// videos download inline (instantly playable); playlist URLs enqueue
-// a background, one-at-a-time download queue with progress pushed
-// over /ws, same shape as the loudness analysis queue below.
+// Audio import — video/track/playlist URLs from YouTube, SoundCloud,
+// Mixcloud, or Bandcamp are resolved and the audio extracted via yt-dlp
+// (+ffmpeg) into ./youtube-cache, tagged and thumbnailed on the way in
+// so the existing metadata/art/loudness pipeline picks them up exactly
+// like any other library file. Only YouTube and SoundCloud have been
+// exercised end-to-end here; Mixcloud/Bandcamp ride the same generic
+// yt-dlp path and should work, but haven't been individually verified.
+// Single items download inline (instantly playable); playlist/set/album
+// URLs enqueue a background, one-at-a-time download queue with progress
+// pushed over /ws, same shape as the loudness analysis queue below.
+// Storage type stays 'youtube' internally (and the field is still called
+// videoId) even for other sites — renaming either would break every
+// existing playlist that already has YouTube tracks saved.
 // ------------------------------------------------------------
-const YOUTUBE_HOSTS = new Set([
-  'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be'
+const IMPORT_HOSTS = new Set([
+  'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be',
+  'soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'on.soundcloud.com',
+  'mixcloud.com', 'www.mixcloud.com'
 ]);
 let ytDlpOk = null;
 
@@ -398,7 +406,7 @@ function ytDlpAvailable() {
   return new Promise((resolve) => {
     execFile('yt-dlp', ['--version'], { timeout: 5000 }, (err) => {
       ytDlpOk = !err;
-      if (!ytDlpOk) console.log('  [youtube] yt-dlp not found — YouTube import disabled (install yt-dlp and ensure it is on PATH)');
+      if (!ytDlpOk) console.log('  [youtube] yt-dlp not found — audio import disabled (install yt-dlp and ensure it is on PATH)');
       resolve(ytDlpOk);
     });
   });
@@ -409,14 +417,19 @@ function safeYoutubeUrl(value) {
   try {
     const u = new URL(value.trim());
     if (!['http:', 'https:'].includes(u.protocol)) return null;
-    if (!YOUTUBE_HOSTS.has(u.hostname.toLowerCase())) return null;
+    const host = u.hostname.toLowerCase();
+    if (!IMPORT_HOSTS.has(host) && host !== 'bandcamp.com' && !host.endsWith('.bandcamp.com')) return null;
     return u.toString();
   } catch { return null; }
 }
 
+// Was "YouTube video ID" (11 chars) shaped; SoundCloud/Mixcloud/Bandcamp
+// ids are numeric or slug-like and don't fit that pattern, so this now
+// just guards what becomes a filename component: safe characters, sane
+// length, nothing that could path-traverse or collide across sites.
 function safeVideoId(value) {
   const id = typeof value === 'string' ? value.trim() : '';
-  return /^[A-Za-z0-9_-]{6,24}$/.test(id) ? id : null;
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(id) && id !== '.' && id !== '..' ? id : null;
 }
 
 function lastErrorLine(text) {
@@ -464,15 +477,53 @@ async function cleanupYoutubeRawFiles(rawStem) {
 // only (no -x/--embed-*), then our own ffmpeg call — driven with
 // -progress pipe:1, which yt-dlp never gets in the way of — does the
 // transcode + metadata + thumbnail embed with a real percentage the whole way.
-function downloadRawAudio(videoId, rawStem, onUpdate) {
+const YT_META_RE = /^NEONAMP-META (.*)$/;
+
+const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
+
+// Finds the files yt-dlp just wrote by their shared "<rawStem>.*" prefix,
+// rather than parsing which filename it chose out of console output.
+// That log-parsing approach turned out to be unreliable: yt-dlp's
+// human-readable info lines ("[download] Destination: ...", "Writing
+// video thumbnail ... to: ...") silently don't reach stdout at all when
+// spawned as a non-tty child process on Windows — confirmed by testing —
+// even though the files are written correctly. --print/--progress-template
+// output is unconditional and unaffected; only those log lines vanish.
+async function findDownloadedFiles(rawStem) {
+  const dir = path.dirname(rawStem);
+  const stem = path.basename(rawStem);
+  let entries = [];
+  try { entries = await fs.readdir(dir); } catch { /* nothing written */ }
+  let audioPath = null;
+  let thumbPath = null;
+  for (const name of entries) {
+    if (name !== stem && !name.startsWith(`${stem}.`)) continue;
+    const full = path.join(dir, name);
+    if (IMAGE_EXT.has(path.extname(name).toLowerCase())) thumbPath = full;
+    else audioPath = full;
+  }
+  return { audioPath, thumbPath };
+}
+
+async function downloadRawAudio(sourceUrl, rawStem, onUpdate) {
   const args = [
     '-f', 'bestaudio/best', '--no-playlist', '--no-warnings', '--newline',
     '--write-thumbnail', '--force-overwrites',
     '--progress-template', YT_DOWNLOAD_TEMPLATE,
+    // A playlist/set's flat listing is fast but sparse — YouTube's includes
+    // title/duration per entry, SoundCloud's (confirmed by testing) only
+    // gives id + url. This resolves the real values as a side effect of
+    // the download that's happening anyway, no extra yt-dlp call needed.
+    // Stage prefix matters: bare/"video:" --print implicitly enables
+    // --simulate and silently skips the actual download entirely (confirmed
+    // by testing against an HLS-fragmented SoundCloud track — no error, no
+    // file at all). "before_dl:" fires per-item right before its download
+    // starts and doesn't carry that implication.
+    '--print', 'before_dl:NEONAMP-META %(title)s|||%(uploader,channel,artist)s|||%(duration)s',
     '-o', `${rawStem}.%(ext)s`,
-    `https://www.youtube.com/watch?v=${videoId}`
+    sourceUrl
   ];
-  return new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     // Without a TTY, Python's stdout is block-buffered by default — progress
     // lines would all arrive in one burst at exit instead of streaming.
     // PYTHONUNBUFFERED forces line-by-line flushing so onUpdate fires live.
@@ -480,8 +531,7 @@ function downloadRawAudio(videoId, rawStem, onUpdate) {
     let stderr = '';
     let buf = '';
     let lastPercent = -1;
-    let audioPath = null;
-    let thumbPath = null;
+    let realMeta = null;
     const timer = setTimeout(() => child.kill(), 30 * 60 * 1000);
     child.stdout.on('data', (chunk) => {
       buf += chunk.toString();
@@ -500,10 +550,14 @@ function downloadRawAudio(videoId, rawStem, onUpdate) {
           }
           continue;
         }
-        let m = /^\[download\] Destination: (.+)$/.exec(line);
-        if (m) { audioPath = m[1].trim(); continue; }
-        m = /Writing video thumbnail.*to: (.+)$/.exec(line);
-        if (m) { thumbPath = m[1].trim(); continue; }
+        const m = YT_META_RE.exec(line);
+        if (m) {
+          const [title, artist, durationStr] = m[1].split('|||');
+          realMeta = {
+            title: title && title !== 'NA' ? title : '', artist: artist && artist !== 'NA' ? artist : '',
+            duration: Math.round(Number(durationStr)) || 0
+          };
+        }
       }
     });
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-4000); });
@@ -511,9 +565,12 @@ function downloadRawAudio(videoId, rawStem, onUpdate) {
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code !== 0) return reject(new Error(lastErrorLine(stderr) || `yt-dlp exited with code ${code}`));
-      if (!audioPath) return reject(new Error('Could not determine the downloaded audio filename'));
-      resolve({ audioPath, thumbPath });
+      resolve(realMeta);
     });
+  }).then(async (realMeta) => {
+    const { audioPath, thumbPath } = await findDownloadedFiles(rawStem);
+    if (!audioPath) throw new Error('Could not determine the downloaded audio filename');
+    return { audioPath, thumbPath, realMeta };
   });
 }
 
@@ -569,14 +626,28 @@ async function convertToM4a(audioPath, thumbPath, dest, meta, onUpdate) {
   });
 }
 
+// Returns the metadata actually embedded, when a fresh download happened —
+// real values from the individual resolve, filled in over whatever sparse
+// placeholder the caller had — so pumpYoutube can correct the persisted
+// track entry if a batch/set add only had "Untitled" to go on. Returns
+// nothing for the already-cached fast path: nothing changed, nothing to fix.
 async function downloadYoutubeAudio(videoId, meta, onUpdate) {
   const dest = path.join(YOUTUBE_DIR, `${videoId}.m4a`);
   try { await fs.access(dest); return; } catch { /* not cached yet */ }
+  const sourceUrl = safeYoutubeUrl(meta?.sourceUrl);
+  if (!sourceUrl) throw new Error('No valid source URL recorded for this track');
   const rawStem = path.join(YOUTUBE_DIR, `${videoId}.src`);
   await cleanupYoutubeRawFiles(rawStem);
   try {
-    const { audioPath, thumbPath } = await downloadRawAudio(videoId, rawStem, onUpdate);
-    await convertToM4a(audioPath, thumbPath, dest, meta, onUpdate);
+    const { audioPath, thumbPath, realMeta } = await downloadRawAudio(sourceUrl, rawStem, onUpdate);
+    const finalMeta = {
+      title: realMeta?.title || meta?.title || 'Untitled',
+      artist: realMeta?.artist || meta?.artist || 'Unknown',
+      album: meta?.album || '',
+      duration: realMeta?.duration || meta?.duration || 0
+    };
+    await convertToM4a(audioPath, thumbPath, dest, finalMeta, onUpdate);
+    return finalMeta;
   } finally {
     await cleanupYoutubeRawFiles(rawStem);
   }
@@ -607,11 +678,29 @@ function broadcastYoutube(event, job, error) {
   const data = JSON.stringify({
     type: 'youtube', event, videoId: job.videoId, playlist: job.playlist, title: job.title,
     percent: Number.isFinite(job.percent) ? job.percent : null, phase: job.phase || null,
-    remaining, ...(error ? { error } : {})
+    remaining, ...(job.correctedMeta ? { meta: job.correctedMeta } : {}), ...(error ? { error } : {})
   });
   for (const c of wssRef.clients) {
     if (c.readyState === WebSocket.OPEN) { try { c.send(data); } catch { /* ignore */ } }
   }
+}
+
+// A batch/set add only had sparse placeholder metadata for some sites
+// (SoundCloud's flat listing, confirmed by testing, has no title/duration
+// per entry) — once the real values are known post-download, fix the
+// persisted entry so it doesn't say "Untitled" forever.
+async function patchYoutubeTrackMeta(playlistName, videoId, finalMeta) {
+  const file = path.join(PLAYLIST_DIR, `${playlistName}.json`);
+  let data;
+  try { data = JSON.parse(await fs.readFile(file, 'utf8')); } catch { return false; }
+  const tracks = Array.isArray(data.tracks) ? data.tracks : [];
+  const idx = tracks.findIndex((t) => t?.storage === 'youtube' && t.videoId === videoId);
+  if (idx < 0) return false;
+  const track = tracks[idx];
+  if (track.title === finalMeta.title && track.artist === finalMeta.artist && track.duration === finalMeta.duration) return false;
+  tracks[idx] = { ...track, title: finalMeta.title, artist: finalMeta.artist, duration: finalMeta.duration };
+  await writeJsonFile(file, { ...data, tracks, saved: new Date().toISOString() });
+  return true;
 }
 
 async function pumpYoutube() {
@@ -623,11 +712,15 @@ async function pumpYoutube() {
   job.phase = 'downloading';
   broadcastYoutube('downloading', job);
   try {
-    await downloadYoutubeAudio(job.videoId, job.meta, (update) => {
+    const finalMeta = await downloadYoutubeAudio(job.videoId, job.meta, (update) => {
       job.phase = update.phase;
       job.percent = update.percent;
       broadcastYoutube('progress', job);
     });
+    if (finalMeta) {
+      job.title = finalMeta.title;
+      if (await patchYoutubeTrackMeta(job.playlist, job.videoId, finalMeta)) job.correctedMeta = finalMeta;
+    }
     enqueueLoudness(trackRef({ storage: 'youtube', file: `${job.videoId}.m4a` }), true);
     job.status = 'ready';
   } catch (err) {
@@ -1191,6 +1284,11 @@ async function prunePlaylistMedia(name, tracks) {
 
 async function writeOwnedPlaylist(name, inputTracks) {
   if (inputTracks.length > 5000) throw new Error('A playlist can contain at most 5000 tracks');
+  // Carry forward the linked YouTube source(s), if any — this rebuilds the
+  // saved file from scratch and would otherwise silently drop them on the
+  // very next unrelated save (reorder, remove a track, whatever).
+  const previous = await readJsonFile(path.join(PLAYLIST_DIR, `${name}.json`), {});
+  const youtubeSources = Array.isArray(previous.youtubeSources) ? previous.youtubeSources : [];
   const tracks = [];
   for (const input of inputTracks) {
     if (input?.storage === 'path') {
@@ -1238,7 +1336,11 @@ async function writeOwnedPlaylist(name, inputTracks) {
       }
       tracks.push({
         storage: 'youtube', file: `${id}.m4a`, videoId: id,
-        sourceUrl: safeYoutubeUrl(input.sourceUrl) || `https://www.youtube.com/watch?v=${id}`,
+        // No blind reconstruction here — a bare id can't be turned back into
+        // a correct URL now that it might be YouTube, SoundCloud, Mixcloud,
+        // or Bandcamp. A client round-tripping its own track data always
+        // has the real sourceUrl anyway; this only degrades for malformed input.
+        sourceUrl: safeYoutubeUrl(input.sourceUrl) || '',
         title: String(input.title || 'Untitled').slice(0, 300),
         artist: String(input.artist || 'YouTube').slice(0, 300),
         album: String(input.album || '').slice(0, 300), genre: String(input.genre || '').slice(0, 300),
@@ -1262,7 +1364,10 @@ async function writeOwnedPlaylist(name, inputTracks) {
     const { storage: _storage, playlist: _playlist, available: _available, ...metadata } = input;
     tracks.push({ ...metadata, file: ref.rel, originalFile: input.originalFile || ref.rel });
   }
-  const data = { version: 2, name, saved: new Date().toISOString(), tracks };
+  const data = {
+    version: 2, name, saved: new Date().toISOString(), tracks,
+    ...(youtubeSources.length ? { youtubeSources } : {})
+  };
   await writeJsonFile(path.join(PLAYLIST_DIR, `${name}.json`), data);
   await prunePlaylistMedia(name, tracks);
   return exposedPlaylist(data, name);
@@ -1270,6 +1375,11 @@ async function writeOwnedPlaylist(name, inputTracks) {
 
 async function materializePlaylist(name, inputTracks, saved = new Date().toISOString()) {
   if (inputTracks.length > 5000) throw new Error('A playlist can contain at most 5000 tracks');
+  // Only carries forward if `name` is the same playlist being resaved (a
+  // duplicate target has no existing file yet, so it starts unlinked —
+  // it wasn't the one anyone pointed a YouTube playlist URL at).
+  const previous = await readJsonFile(path.join(PLAYLIST_DIR, `${name}.json`), {});
+  const youtubeSources = Array.isArray(previous.youtubeSources) ? previous.youtubeSources : [];
   const revision = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
   const revisionDir = path.join(PLAYLIST_MEDIA_DIR, name, revision);
   const usedNames = new Map();
@@ -1324,7 +1434,11 @@ async function materializePlaylist(name, inputTracks, saved = new Date().toISOSt
         }
         tracks.push({
           storage: 'youtube', file: `${id}.m4a`, videoId: id,
-          sourceUrl: safeYoutubeUrl(input.sourceUrl) || `https://www.youtube.com/watch?v=${id}`,
+          // No blind reconstruction here — a bare id can't be turned back into
+        // a correct URL now that it might be YouTube, SoundCloud, Mixcloud,
+        // or Bandcamp. A client round-tripping its own track data always
+        // has the real sourceUrl anyway; this only degrades for malformed input.
+        sourceUrl: safeYoutubeUrl(input.sourceUrl) || '',
           title: String(input.title || 'Untitled').slice(0, 300),
           artist: String(input.artist || 'YouTube').slice(0, 300),
           album: String(input.album || '').slice(0, 300), genre: String(input.genre || '').slice(0, 300),
@@ -1368,7 +1482,7 @@ async function materializePlaylist(name, inputTracks, saved = new Date().toISOSt
       });
     }
 
-    const data = { version: 2, name, saved, tracks };
+    const data = { version: 2, name, saved, tracks, ...(youtubeSources.length ? { youtubeSources } : {}) };
     await fs.writeFile(path.join(PLAYLIST_DIR, `${name}.json`), JSON.stringify(data, null, 2), 'utf8');
     await prunePlaylistMedia(name, tracks);
     return exposedPlaylist(data, name);
@@ -1538,6 +1652,38 @@ app.post('/api/playlists/:name/paths', async (req, res) => {
   }
 });
 
+function buildYoutubeStubs(rawEntries, info, isPlaylist, existingIds) {
+  const playlistTitle = isPlaylist ? String(info.title || '').trim().slice(0, 300) : '';
+  const seenIds = new Set(existingIds);
+  const stubs = [];
+  for (const e of rawEntries) {
+    const id = safeVideoId(e?.id);
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    // webpage_url/url point at the actual source page regardless of site —
+    // reconstructing a youtube.com URL from just the id (the old approach)
+    // silently pointed non-YouTube tracks at the wrong site entirely.
+    const sourceUrl = safeYoutubeUrl(e?.webpage_url || e?.url) || safeYoutubeUrl(info.webpage_url) || '';
+    stubs.push({
+      storage: 'youtube', file: `${id}.m4a`, videoId: id, sourceUrl,
+      title: String(e.title || 'Untitled').trim().slice(0, 300),
+      artist: String(e.uploader || e.channel || info.uploader || info.channel || 'Unknown').trim().slice(0, 300),
+      album: playlistTitle, genre: '', year: '',
+      duration: Math.max(0, Math.round(Number(e.duration)) || 0),
+      bitrate: 0, sampleRate: 0, channels: 2
+    });
+  }
+  return stubs;
+}
+
+function queueYoutubeStubs(stubs, playlistName) {
+  for (const stub of stubs) {
+    enqueueYoutube(stub.videoId, playlistName, {
+      title: stub.title, artist: stub.artist, album: stub.album, duration: stub.duration, sourceUrl: stub.sourceUrl
+    });
+  }
+}
+
 // A single video downloads inline so it is instantly playable; a playlist
 // URL is resolved (fast — no audio fetched yet) and its videos queued for
 // background download, one at a time, with progress over /ws.
@@ -1561,31 +1707,23 @@ app.post('/api/playlists/:name/youtube', async (req, res) => {
 
   const isPlaylist = Array.isArray(info.entries);
   const rawEntries = isPlaylist ? info.entries.slice(0, 300) : [info];
-  const playlistTitle = isPlaylist ? String(info.title || '').trim().slice(0, 300) : '';
   const existing = Array.isArray(data.tracks) ? data.tracks : [];
-  const seenIds = new Set(existing.filter((t) => t?.storage === 'youtube').map((t) => t.videoId));
+  const existingIds = existing.filter((t) => t?.storage === 'youtube').map((t) => t.videoId);
+  const stubs = buildYoutubeStubs(rawEntries, info, isPlaylist, existingIds);
 
-  const stubs = [];
-  for (const e of rawEntries) {
-    const id = safeVideoId(e?.id);
-    if (!id || seenIds.has(id)) continue;
-    seenIds.add(id);
-    stubs.push({
-      storage: 'youtube', file: `${id}.m4a`, videoId: id,
-      sourceUrl: `https://www.youtube.com/watch?v=${id}`,
-      title: String(e.title || 'Untitled').trim().slice(0, 300),
-      artist: String(e.uploader || e.channel || info.uploader || info.channel || 'YouTube').trim().slice(0, 300),
-      album: playlistTitle, genre: '', year: '',
-      duration: Math.max(0, Math.round(Number(e.duration)) || 0),
-      bitrate: 0, sampleRate: 0, channels: 2
-    });
-  }
   if (!stubs.length) {
     return res.status(400).json({ error: isPlaylist ? 'No new videos found in that playlist' : 'That video is already in this playlist' });
   }
   if (existing.length + stubs.length > 5000) return res.status(409).json({ error: 'A playlist can contain at most 5000 tracks' });
 
-  const next = { ...data, version: 2, name, saved: new Date().toISOString(), tracks: [...existing, ...stubs] };
+  // A playlist URL is remembered so this NEONAMP playlist can be checked
+  // later for videos added to the source since — a single video URL isn't,
+  // there's nothing to "check again" for one fixed video.
+  const youtubeSources = isPlaylist
+    ? [...new Set([...(Array.isArray(data.youtubeSources) ? data.youtubeSources : []), url])]
+    : (Array.isArray(data.youtubeSources) ? data.youtubeSources : []);
+
+  const next = { ...data, version: 2, name, saved: new Date().toISOString(), tracks: [...existing, ...stubs], youtubeSources };
   await writeJsonFile(playlistFile, next);
   const playlist = exposedPlaylist(next, name);
 
@@ -1593,11 +1731,83 @@ app.post('/api/playlists/:name/youtube', async (req, res) => {
   // "short song, ready the instant the dialog closes" fast path sounds
   // nice until someone adds a multi-hour mix: the request (and the modal)
   // would hang for as long as the download takes, with no progress shown.
-  for (const stub of stubs) {
-    enqueueYoutube(stub.videoId, name, { title: stub.title, artist: stub.artist, album: stub.album, duration: stub.duration });
-  }
+  queueYoutubeStubs(stubs, name);
 
-  res.json({ ok: true, name, count: playlist.tracks.length, added: stubs, queued: true, tracks: playlist.tracks });
+  res.json({ ok: true, name, count: playlist.tracks.length, added: stubs, queued: true, tracks: playlist.tracks, youtubeSources: playlist.youtubeSources });
+});
+
+// Re-resolves every YouTube playlist URL this NEONAMP playlist was ever
+// built from and queues anything new. Never removes tracks whose source
+// video vanished from the upstream list — the local download is still
+// good, and silently deleting someone's queue entry is exactly the kind
+// of surprise this app avoids everywhere else.
+async function resyncYoutubePlaylist(name) {
+  const playlistFile = path.join(PLAYLIST_DIR, `${name}.json`);
+  let data;
+  try { data = JSON.parse(await fs.readFile(playlistFile, 'utf8')); } catch { return { added: [] }; }
+  const sources = Array.isArray(data.youtubeSources) ? data.youtubeSources : [];
+  if (!sources.length) return { added: [] };
+
+  let existing = Array.isArray(data.tracks) ? data.tracks : [];
+  const added = [];
+  for (const url of sources) {
+    let info;
+    try { info = await resolveYoutube(url); } catch { continue; }
+    const isPlaylist = Array.isArray(info.entries);
+    const rawEntries = isPlaylist ? info.entries.slice(0, 300) : [info];
+    const existingIds = existing.filter((t) => t?.storage === 'youtube').map((t) => t.videoId);
+    const stubs = buildYoutubeStubs(rawEntries, info, isPlaylist, existingIds);
+    if (!stubs.length) continue;
+    existing = [...existing, ...stubs];
+    added.push(...stubs);
+  }
+  if (!added.length) return { added: [] };
+  if (existing.length > 5000) return { added: [] };
+
+  const next = { ...data, version: 2, name, saved: new Date().toISOString(), tracks: existing };
+  await writeJsonFile(playlistFile, next);
+  queueYoutubeStubs(added, name);
+  return { added, playlist: exposedPlaylist(next, name) };
+}
+
+app.post('/api/playlists/:name/youtube/resync', async (req, res) => {
+  const name = safeName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid playlist name' });
+  if (!(await ytDlpAvailable())) {
+    return res.status(503).json({ error: 'yt-dlp was not found on PATH — install yt-dlp to add YouTube audio' });
+  }
+  try {
+    const { added, playlist } = await resyncYoutubePlaylist(name);
+    res.json({
+      ok: true, added: added.map((s) => ({ videoId: s.videoId, title: s.title })),
+      tracks: playlist?.tracks
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Re-queues a track that previously failed to download. The track entry
+// itself already carries everything needed (title/artist/album/duration),
+// so this is just enqueueYoutube() again — ytQueued no longer blocks it
+// once a job has resolved to 'error'.
+app.post('/api/playlists/:name/youtube/retry', async (req, res) => {
+  const name = safeName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid playlist name' });
+  const videoId = safeVideoId(req.body?.videoId);
+  if (!videoId) return res.status(400).json({ error: 'A valid videoId is required' });
+  if (!(await ytDlpAvailable())) {
+    return res.status(503).json({ error: 'yt-dlp was not found on PATH — install yt-dlp to add YouTube audio' });
+  }
+  let data;
+  try { data = JSON.parse(await fs.readFile(path.join(PLAYLIST_DIR, `${name}.json`), 'utf8')); }
+  catch { return res.status(404).json({ error: 'Playlist not found' }); }
+  const track = (Array.isArray(data.tracks) ? data.tracks : []).find((t) => t?.storage === 'youtube' && t.videoId === videoId);
+  if (!track) return res.status(404).json({ error: 'That track is not in this playlist' });
+  enqueueYoutube(videoId, name, {
+    title: track.title, artist: track.artist, album: track.album, duration: track.duration, sourceUrl: track.sourceUrl
+  });
+  res.json({ ok: true });
 });
 
 // Snapshot of in-flight downloads, so a (re)loaded playlist manager can show
@@ -2666,3 +2876,33 @@ setInterval(() => {
     try { c.ping(); } catch { /* ignore */ }
   }
 }, 30000);
+
+// Playlists built from a YouTube playlist URL remember it (data.youtubeSources)
+// so a running series — new episodes added to the same source over time —
+// gets picked up without the user having to notice and re-paste the URL.
+const YT_RESYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+async function resyncAllYoutubePlaylists() {
+  let files = [];
+  try { files = (await fs.readdir(PLAYLIST_DIR)).filter((f) => f.endsWith('.json') && !f.startsWith('_')); } catch { return; }
+  for (const file of files) {
+    const name = safeName(file.replace(/\.json$/i, ''));
+    if (!name) continue;
+    try {
+      const data = JSON.parse(await fs.readFile(path.join(PLAYLIST_DIR, file), 'utf8'));
+      if (!Array.isArray(data.youtubeSources) || !data.youtubeSources.length) continue;
+    } catch { continue; }
+    try {
+      const { added } = await resyncYoutubePlaylist(name);
+      if (added.length) {
+        console.log(`  [youtube] resync found ${added.length} new video(s) for playlist "${name}"`);
+        broadcastCmd('youtube-resync', { playlist: name, added: added.length });
+      }
+    } catch (err) {
+      console.warn(`  [youtube] resync failed for playlist "${name}": ${err.message}`);
+    }
+  }
+}
+
+setTimeout(() => { resyncAllYoutubePlaylists().catch(() => {}); }, 2 * 60 * 1000);
+setInterval(() => { resyncAllYoutubePlaylists().catch(() => {}); }, YT_RESYNC_INTERVAL_MS);
