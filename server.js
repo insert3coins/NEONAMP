@@ -47,11 +47,6 @@ async function ffmpegBin() {
   }
   return ffmpegBinCache;
 }
-async function ffmpegDir() {
-  const bin = await ffmpegBin();
-  return bin === 'ffmpeg' ? '' : path.dirname(bin);
-}
-
 await fs.mkdir(MUSIC_DIR, { recursive: true });
 await fs.mkdir(PLAYLIST_DIR, { recursive: true });
 await fs.mkdir(PLAYLIST_MEDIA_DIR, { recursive: true });
@@ -446,27 +441,35 @@ function resolveYoutube(url) {
 const YT_DOWNLOAD_TEMPLATE =
   'download:NEONAMP-DL %(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s';
 const YT_DOWNLOAD_RE = /^NEONAMP-DL (\d+|NA)\|(\d+|NA)\|(\d+|NA)$/;
-// Once every byte is fetched, yt-dlp still has to run ffmpeg to extract the
-// audio and mux in the thumbnail/tags — a real chunk of time with no byte
-// count to report. This just flags "still working" so the UI doesn't sit
-// frozen at 100% looking stuck; per-postprocessor names aren't exposed
-// through --progress-template, so one started→"processing" transition
-// covering the whole postprocess chain is what's available.
-const YT_POSTPROCESS_TEMPLATE = 'postprocess:NEONAMP-PP %(progress.status)s';
-const YT_POSTPROCESS_RE = /^NEONAMP-PP (\w+)$/;
 
-async function downloadYoutubeAudio(videoId, onUpdate) {
-  const dest = path.join(YOUTUBE_DIR, `${videoId}.m4a`);
-  try { await fs.access(dest); return; } catch { /* not cached yet */ }
-  const ffDir = await ffmpegDir();
+// Deletes anything from a previous (interrupted or completed) attempt for
+// this video: "<id>.src.webm", "<id>.src.webp", yt-dlp's own ".part"/".ytdl"
+// resume sidecars, etc. — anything sharing the "<id>.src" stem.
+async function cleanupYoutubeRawFiles(rawStem) {
+  const dir = path.dirname(rawStem);
+  const stem = path.basename(rawStem);
+  let entries = [];
+  try { entries = await fs.readdir(dir); } catch { return; }
+  for (const name of entries) {
+    if (name === stem || name.startsWith(`${stem}.`)) await fs.unlink(path.join(dir, name)).catch(() => {});
+  }
+}
+
+// yt-dlp's own audio extraction runs ffmpeg as an internal subprocess it
+// doesn't expose progress for (--progress-template only reports per-stage
+// start/finish, not how far into a stage it is — confirmed by testing;
+// --postprocessor-args to inject ffmpeg's own -progress into that internal
+// call didn't work either, it broke yt-dlp's ffmpeg version-check). So we
+// do the conversion ourselves: yt-dlp downloads the raw audio + thumbnail
+// only (no -x/--embed-*), then our own ffmpeg call — driven with
+// -progress pipe:1, which yt-dlp never gets in the way of — does the
+// transcode + metadata + thumbnail embed with a real percentage the whole way.
+function downloadRawAudio(videoId, rawStem, onUpdate) {
   const args = [
-    '-f', 'bestaudio/best', '-x', '--audio-format', 'm4a', '--audio-quality', '0',
-    '--embed-thumbnail', '--embed-metadata', '--no-playlist', '--no-warnings',
-    '--newline',
+    '-f', 'bestaudio/best', '--no-playlist', '--no-warnings', '--newline',
+    '--write-thumbnail', '--force-overwrites',
     '--progress-template', YT_DOWNLOAD_TEMPLATE,
-    '--progress-template', YT_POSTPROCESS_TEMPLATE,
-    ...(ffDir ? ['--ffmpeg-location', ffDir] : []),
-    '-o', path.join(YOUTUBE_DIR, '%(id)s.%(ext)s'),
+    '-o', `${rawStem}.%(ext)s`,
     `https://www.youtube.com/watch?v=${videoId}`
   ];
   return new Promise((resolve, reject) => {
@@ -477,9 +480,8 @@ async function downloadYoutubeAudio(videoId, onUpdate) {
     let stderr = '';
     let buf = '';
     let lastPercent = -1;
-    let announcedProcessing = false;
-    // Runs off the background queue, not a blocking request, so a generous
-    // ceiling costs nothing — long mixes/DJ sets are a real use case here.
+    let audioPath = null;
+    let thumbPath = null;
     const timer = setTimeout(() => child.kill(), 30 * 60 * 1000);
     child.stdout.on('data', (chunk) => {
       buf += chunk.toString();
@@ -498,11 +500,10 @@ async function downloadYoutubeAudio(videoId, onUpdate) {
           }
           continue;
         }
-        const pp = YT_POSTPROCESS_RE.exec(line);
-        if (pp && pp[1] === 'started' && !announcedProcessing) {
-          announcedProcessing = true;
-          onUpdate?.({ phase: 'processing', percent: null });
-        }
+        let m = /^\[download\] Destination: (.+)$/.exec(line);
+        if (m) { audioPath = m[1].trim(); continue; }
+        m = /Writing video thumbnail.*to: (.+)$/.exec(line);
+        if (m) { thumbPath = m[1].trim(); continue; }
       }
     });
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-4000); });
@@ -510,9 +511,75 @@ async function downloadYoutubeAudio(videoId, onUpdate) {
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code !== 0) return reject(new Error(lastErrorLine(stderr) || `yt-dlp exited with code ${code}`));
-      fs.access(dest).then(resolve, () => reject(new Error('Download finished but the output file is missing')));
+      if (!audioPath) return reject(new Error('Could not determine the downloaded audio filename'));
+      resolve({ audioPath, thumbPath });
     });
   });
+}
+
+async function convertToM4a(audioPath, thumbPath, dest, meta, onUpdate) {
+  const ffBin = await ffmpegBin();
+  const durationSeconds = Number(meta?.duration) || 0;
+  const args = [
+    '-y', '-i', audioPath,
+    ...(thumbPath ? ['-i', thumbPath] : []),
+    '-map', '0:a',
+    ...(thumbPath ? ['-map', '1:v', '-c:v', 'mjpeg', '-disposition:v', 'attached_pic'] : []),
+    '-c:a', 'aac', '-b:a', '192k',
+    ...(meta?.title ? ['-metadata', `title=${meta.title}`] : []),
+    ...(meta?.artist ? ['-metadata', `artist=${meta.artist}`] : []),
+    ...(meta?.album ? ['-metadata', `album=${meta.album}`] : []),
+    '-progress', 'pipe:1', '-nostats', '-loglevel', 'error',
+    '-f', 'mp4', dest
+  ];
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffBin, args, { windowsHide: true });
+    let stderr = '';
+    let buf = '';
+    let lastPercent = -1;
+    const timer = setTimeout(() => child.kill(), 30 * 60 * 1000);
+    child.stdout.on('data', (chunk) => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        // out_time_ms is a long-standing ffmpeg misnomer: it's actually
+        // microseconds (identical to out_time_us) — confirmed by testing,
+        // not documentation. Dividing by 1000 instead of 1e6 would read
+        // 1000x too fast.
+        const m = /^out_time_us=(-?\d+)$/.exec(line);
+        if (m && durationSeconds > 0) {
+          const seconds = Math.max(0, Number(m[1])) / 1_000_000;
+          const percent = Math.max(0, Math.min(100, Math.round((seconds / durationSeconds) * 100)));
+          if (percent !== lastPercent) {
+            lastPercent = percent;
+            onUpdate?.({ phase: 'converting', percent });
+          }
+        }
+      }
+    });
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-4000); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(lastErrorLine(stderr) || `ffmpeg exited with code ${code}`));
+      resolve();
+    });
+  });
+}
+
+async function downloadYoutubeAudio(videoId, meta, onUpdate) {
+  const dest = path.join(YOUTUBE_DIR, `${videoId}.m4a`);
+  try { await fs.access(dest); return; } catch { /* not cached yet */ }
+  const rawStem = path.join(YOUTUBE_DIR, `${videoId}.src`);
+  await cleanupYoutubeRawFiles(rawStem);
+  try {
+    const { audioPath, thumbPath } = await downloadRawAudio(videoId, rawStem, onUpdate);
+    await convertToM4a(audioPath, thumbPath, dest, meta, onUpdate);
+  } finally {
+    await cleanupYoutubeRawFiles(rawStem);
+  }
 }
 
 const ytQueue = [];
@@ -525,10 +592,10 @@ const ytQueued = new Set();
 const ytJobs = new Map();
 let ytBusy = false;
 
-function enqueueYoutube(videoId, playlist, title) {
+function enqueueYoutube(videoId, playlist, meta) {
   if (ytQueued.has(videoId)) return;
   ytQueued.add(videoId);
-  const job = { videoId, playlist, title, status: 'queued' };
+  const job = { videoId, playlist, title: meta?.title || '', meta, status: 'queued' };
   ytJobs.set(videoId, job);
   ytQueue.push(job);
   broadcastYoutube('queued', job);
@@ -556,7 +623,7 @@ async function pumpYoutube() {
   job.phase = 'downloading';
   broadcastYoutube('downloading', job);
   try {
-    await downloadYoutubeAudio(job.videoId, (update) => {
+    await downloadYoutubeAudio(job.videoId, job.meta, (update) => {
       job.phase = update.phase;
       job.percent = update.percent;
       broadcastYoutube('progress', job);
@@ -1526,7 +1593,9 @@ app.post('/api/playlists/:name/youtube', async (req, res) => {
   // "short song, ready the instant the dialog closes" fast path sounds
   // nice until someone adds a multi-hour mix: the request (and the modal)
   // would hang for as long as the download takes, with no progress shown.
-  for (const stub of stubs) enqueueYoutube(stub.videoId, name, stub.title);
+  for (const stub of stubs) {
+    enqueueYoutube(stub.videoId, name, { title: stub.title, artist: stub.artist, album: stub.album, duration: stub.duration });
+  }
 
   res.json({ ok: true, name, count: playlist.tracks.length, added: stubs, queued: true, tracks: playlist.tracks });
 });

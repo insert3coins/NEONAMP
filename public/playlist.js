@@ -1171,12 +1171,10 @@ function renderYtProgress() {
   }
   const parts = [];
   if (downloading) {
-    if (downloading.phase === 'processing') {
-      parts.push(`⚙ PROCESSING: ${(downloading.title || 'UNTITLED').toUpperCase()}`);
-    } else {
-      const pct = Number.isFinite(downloading.percent) ? ` ${downloading.percent}%` : '';
-      parts.push(`⬇ DOWNLOADING: ${(downloading.title || 'UNTITLED').toUpperCase()}${pct}`);
-    }
+    const icon = downloading.phase === 'converting' ? '⚙' : '⬇';
+    const label = downloading.phase === 'converting' ? 'CONVERTING' : 'DOWNLOADING';
+    const pct = Number.isFinite(downloading.percent) ? ` ${downloading.percent}%` : '';
+    parts.push(`${icon} ${label}: ${(downloading.title || 'UNTITLED').toUpperCase()}${pct}`);
   }
   if (queuedCount) parts.push(`${queuedCount} QUEUED`);
   if (failedCount) parts.push(`${failedCount} FAILED`);
@@ -1187,8 +1185,8 @@ function renderYtProgress() {
 function youtubeKindText(job) {
   if (!job) return 'YOUTUBE';
   if (job.status === 'downloading') {
-    if (job.phase === 'processing') return 'PROCESSING';
-    return `DOWNLOADING${Number.isFinite(job.percent) ? ` ${job.percent}%` : ''}`;
+    const label = job.phase === 'converting' ? 'CONVERTING' : 'DOWNLOADING';
+    return `${label}${Number.isFinite(job.percent) ? ` ${job.percent}%` : ''}`;
   }
   if (job.status === 'queued') return 'QUEUED';
   if (job.status === 'error') return 'FAILED';
