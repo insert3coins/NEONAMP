@@ -1171,8 +1171,12 @@ function renderYtProgress() {
   }
   const parts = [];
   if (downloading) {
-    const pct = Number.isFinite(downloading.percent) ? ` ${downloading.percent}%` : '';
-    parts.push(`⬇ DOWNLOADING: ${(downloading.title || 'UNTITLED').toUpperCase()}${pct}`);
+    if (downloading.phase === 'processing') {
+      parts.push(`⚙ PROCESSING: ${(downloading.title || 'UNTITLED').toUpperCase()}`);
+    } else {
+      const pct = Number.isFinite(downloading.percent) ? ` ${downloading.percent}%` : '';
+      parts.push(`⬇ DOWNLOADING: ${(downloading.title || 'UNTITLED').toUpperCase()}${pct}`);
+    }
   }
   if (queuedCount) parts.push(`${queuedCount} QUEUED`);
   if (failedCount) parts.push(`${failedCount} FAILED`);
@@ -1182,7 +1186,10 @@ function renderYtProgress() {
 
 function youtubeKindText(job) {
   if (!job) return 'YOUTUBE';
-  if (job.status === 'downloading') return `DOWNLOADING${Number.isFinite(job.percent) ? ` ${job.percent}%` : ''}`;
+  if (job.status === 'downloading') {
+    if (job.phase === 'processing') return 'PROCESSING';
+    return `DOWNLOADING${Number.isFinite(job.percent) ? ` ${job.percent}%` : ''}`;
+  }
   if (job.status === 'queued') return 'QUEUED';
   if (job.status === 'error') return 'FAILED';
   return 'YOUTUBE';
@@ -1199,14 +1206,14 @@ function updateYoutubeRowBadge(videoId) {
 }
 
 function handleYoutubeEvent(message) {
-  const { event, videoId, playlist, title, error, percent } = message;
+  const { event, videoId, playlist, title, error, percent, phase } = message;
   if (event === 'ready') {
     ytJobs.delete(videoId);
   } else if (event === 'progress') {
     // A progress tick doesn't carry a status of its own — it's always
-    // mid-download — so patch the percent onto whatever's already there
-    // rather than replacing the job.
-    ytJobs.set(videoId, { ...(ytJobs.get(videoId) || { status: 'downloading', playlist, title }), percent });
+    // mid-download — so patch the percent/phase onto whatever's already
+    // there rather than replacing the job.
+    ytJobs.set(videoId, { ...(ytJobs.get(videoId) || { status: 'downloading', playlist, title }), percent, phase });
   } else {
     ytJobs.set(videoId, { status: event, playlist, title, error });
   }

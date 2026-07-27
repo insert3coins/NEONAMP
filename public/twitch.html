@@ -286,7 +286,7 @@ function renderNowPlaying() {
   const preview = has ? tpl
     .replace('{title}', np.title)
     .replace('{artist}', np.artist || 'Unknown')
-    .replace('{artistUrl}', np.artistUrl || np.comment || '')
+    .replace('{artistUrl}', np.artistUrl || (np.storage === 'youtube' ? np.sourceUrl : '') || np.comment || '')
     .replace('{album}', np.album || '')
     .replace('{year}', np.year || '')
     .replace('{file}', np.file || '')

@@ -443,18 +443,28 @@ function resolveYoutube(url) {
 // One line per progress tick, in a format cheap to parse: raw byte counts,
 // not yt-dlp's human-formatted strings. total_bytes is empty ("NA") until
 // yt-dlp knows the real size, in which case total_bytes_estimate fills in.
-const YT_PROGRESS_TEMPLATE =
-  'download:NEONAMP-PROGRESS %(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s';
-const YT_PROGRESS_RE = /^NEONAMP-PROGRESS (\d+|NA)\|(\d+|NA)\|(\d+|NA)$/;
+const YT_DOWNLOAD_TEMPLATE =
+  'download:NEONAMP-DL %(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s';
+const YT_DOWNLOAD_RE = /^NEONAMP-DL (\d+|NA)\|(\d+|NA)\|(\d+|NA)$/;
+// Once every byte is fetched, yt-dlp still has to run ffmpeg to extract the
+// audio and mux in the thumbnail/tags — a real chunk of time with no byte
+// count to report. This just flags "still working" so the UI doesn't sit
+// frozen at 100% looking stuck; per-postprocessor names aren't exposed
+// through --progress-template, so one started→"processing" transition
+// covering the whole postprocess chain is what's available.
+const YT_POSTPROCESS_TEMPLATE = 'postprocess:NEONAMP-PP %(progress.status)s';
+const YT_POSTPROCESS_RE = /^NEONAMP-PP (\w+)$/;
 
-async function downloadYoutubeAudio(videoId, onProgress) {
+async function downloadYoutubeAudio(videoId, onUpdate) {
   const dest = path.join(YOUTUBE_DIR, `${videoId}.m4a`);
   try { await fs.access(dest); return; } catch { /* not cached yet */ }
   const ffDir = await ffmpegDir();
   const args = [
     '-f', 'bestaudio/best', '-x', '--audio-format', 'm4a', '--audio-quality', '0',
     '--embed-thumbnail', '--embed-metadata', '--no-playlist', '--no-warnings',
-    '--newline', '--progress-template', YT_PROGRESS_TEMPLATE,
+    '--newline',
+    '--progress-template', YT_DOWNLOAD_TEMPLATE,
+    '--progress-template', YT_POSTPROCESS_TEMPLATE,
     ...(ffDir ? ['--ffmpeg-location', ffDir] : []),
     '-o', path.join(YOUTUBE_DIR, '%(id)s.%(ext)s'),
     `https://www.youtube.com/watch?v=${videoId}`
@@ -462,11 +472,12 @@ async function downloadYoutubeAudio(videoId, onProgress) {
   return new Promise((resolve, reject) => {
     // Without a TTY, Python's stdout is block-buffered by default — progress
     // lines would all arrive in one burst at exit instead of streaming.
-    // PYTHONUNBUFFERED forces line-by-line flushing so onProgress fires live.
+    // PYTHONUNBUFFERED forces line-by-line flushing so onUpdate fires live.
     const child = spawn('yt-dlp', args, { windowsHide: true, env: { ...process.env, PYTHONUNBUFFERED: '1' } });
     let stderr = '';
     let buf = '';
     let lastPercent = -1;
+    let announcedProcessing = false;
     // Runs off the background queue, not a blocking request, so a generous
     // ceiling costs nothing — long mixes/DJ sets are a real use case here.
     const timer = setTimeout(() => child.kill(), 30 * 60 * 1000);
@@ -476,14 +487,21 @@ async function downloadYoutubeAudio(videoId, onProgress) {
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 1);
-        const m = YT_PROGRESS_RE.exec(line);
-        if (!m) continue;
-        const downloaded = Number(m[1]);
-        const total = m[2] !== 'NA' ? Number(m[2]) : (m[3] !== 'NA' ? Number(m[3]) : 0);
-        const percent = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
-        if (percent !== null && percent !== lastPercent) {
-          lastPercent = percent;
-          onProgress?.(percent);
+        const dl = YT_DOWNLOAD_RE.exec(line);
+        if (dl) {
+          const downloaded = Number(dl[1]);
+          const total = dl[2] !== 'NA' ? Number(dl[2]) : (dl[3] !== 'NA' ? Number(dl[3]) : 0);
+          const percent = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
+          if (percent !== null && percent !== lastPercent) {
+            lastPercent = percent;
+            onUpdate?.({ phase: 'downloading', percent });
+          }
+          continue;
+        }
+        const pp = YT_POSTPROCESS_RE.exec(line);
+        if (pp && pp[1] === 'started' && !announcedProcessing) {
+          announcedProcessing = true;
+          onUpdate?.({ phase: 'processing', percent: null });
         }
       }
     });
@@ -521,7 +539,8 @@ function broadcastYoutube(event, job, error) {
   const remaining = ytQueue.length + (ytBusy ? 1 : 0);
   const data = JSON.stringify({
     type: 'youtube', event, videoId: job.videoId, playlist: job.playlist, title: job.title,
-    percent: Number.isFinite(job.percent) ? job.percent : null, remaining, ...(error ? { error } : {})
+    percent: Number.isFinite(job.percent) ? job.percent : null, phase: job.phase || null,
+    remaining, ...(error ? { error } : {})
   });
   for (const c of wssRef.clients) {
     if (c.readyState === WebSocket.OPEN) { try { c.send(data); } catch { /* ignore */ } }
@@ -534,10 +553,12 @@ async function pumpYoutube() {
   if (!job) return;
   ytBusy = true;
   job.status = 'downloading';
+  job.phase = 'downloading';
   broadcastYoutube('downloading', job);
   try {
-    await downloadYoutubeAudio(job.videoId, (percent) => {
-      job.percent = percent;
+    await downloadYoutubeAudio(job.videoId, (update) => {
+      job.phase = update.phase;
+      job.percent = update.percent;
       broadcastYoutube('progress', job);
     });
     enqueueLoudness(trackRef({ storage: 'youtube', file: `${job.videoId}.m4a` }), true);
@@ -1513,7 +1534,7 @@ app.post('/api/playlists/:name/youtube', async (req, res) => {
 // Snapshot of in-flight downloads, so a (re)loaded playlist manager can show
 // current progress immediately instead of waiting on the next /ws event.
 app.get('/api/youtube/queue', (req, res) => {
-  res.json({ jobs: [...ytJobs.values()].map(({ videoId, playlist, title, status, error, percent }) => ({ videoId, playlist, title, status, error, percent })) });
+  res.json({ jobs: [...ytJobs.values()].map(({ videoId, playlist, title, status, error, percent, phase }) => ({ videoId, playlist, title, status, error, percent, phase })) });
 });
 
 async function unusedPlaylistUploadName(dir, name) {
@@ -1997,6 +2018,11 @@ async function sendChat(message) {
 
 async function enrichNowPlaying(s) {
   if (!s || !s.file) return s;
+  // yt-dlp's --embed-metadata doesn't map the source URL into any tag
+  // trackInfo()/extractOfficialArtistUrl() would find, so for a YouTube
+  // track the reliable link is the one already recorded on the track
+  // itself, not something worth reading the file for.
+  if (s.storage === 'youtube' && s.sourceUrl && !s.artistUrl) return { ...s, artistUrl: s.sourceUrl };
   if (s.artistUrl || s.comment) return s;
   try {
     const ref = trackRef(s);

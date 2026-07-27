@@ -2296,6 +2296,7 @@ function sendState() {
     storage: t ? (t.storage || 'library') : 'library',
     playlist: t?.playlist || '',
     sourceId: t?.sourceId || '',
+    sourceUrl: t?.sourceUrl || '',
     queueName: currentName,
     originalFile: t?.originalFile || '',
     station: t?.storage === 'radio' ? t.title : '',
