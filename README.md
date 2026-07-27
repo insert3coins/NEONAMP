@@ -198,10 +198,18 @@ as any other track, with title, artist, duration, and thumbnail read
 straight from the downloaded file's embedded tags. A single video URL
 downloads immediately, ready to play as soon as the dialog closes; a
 playlist URL is resolved instantly and its tracks queue for background
-download one at a time, with progress reported live over `/ws`.
-Requires `yt-dlp` on PATH — install it separately (`pip install
-yt-dlp` or see [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp));
-without it, adding YouTube audio fails with a clear error.
+download one at a time. Progress is visible two ways: an amber status
+strip above the toolbar (`⬇ DOWNLOADING: <title> · N QUEUED · N
+FAILED`) and each queued track's TYPE column, which reads QUEUED /
+DOWNLOADING / FAILED until the file lands and reverts to YOUTUBE.
+Both are driven live over `/ws`, and a (re)loaded playlist manager
+fetches current progress on load too, so reopening the page mid-batch
+still shows where things stand. Deleting a playlist also reclaims its
+`youtube-cache/` audio, unless another saved playlist still uses the
+same video. Requires `yt-dlp` on PATH — install it separately (`pip
+install yt-dlp` or see
+[github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp)); without
+it, adding YouTube audio fails with a clear error.
 
 ## Playlist utilities
 

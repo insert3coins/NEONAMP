@@ -627,10 +627,13 @@ function youtubeDialog() {
       tracks = Array.isArray(result.tracks) ? result.tracks : tracks;
       selected = Math.max(0, tracks.length - (result.added?.length || 1));
       setDirty(false);
-      if (result.queued) {
-        for (const stub of result.added || []) ytJobs.set(stub.videoId, { status: 'queued', playlist: currentName, title: stub.title });
-        renderYtProgress();
-      }
+      // Don't optimistically write 'queued' here: the server processes the
+      // queue as soon as it's enqueued (synchronously, ahead of this fetch
+      // response for anything already cached), so a /ws 'ready' can beat
+      // this handler back to the browser. Writing 'queued' after that would
+      // stomp a correct, already-resolved state. Rely on the /ws push (and
+      // the reconcileYoutubeQueue() safety net) as the single writer instead.
+      if (result.queued) reconcileYoutubeQueue();
       renderTracks();
       await refreshPlaylists();
       closeModal();
@@ -1165,6 +1168,7 @@ function renderYtProgress() {
   const failedCount = jobs.filter((j) => j.status === 'error').length;
   if (!downloading && !queuedCount && !failedCount) {
     els.ytProgress.classList.add('hidden');
+    els.ytProgress.textContent = '';
     return;
   }
   const parts = [];
@@ -1187,6 +1191,35 @@ function handleYoutubeEvent(message) {
   if (event === 'ready') toast(`DOWNLOADED: ${trackLabel(track).toUpperCase()}`);
   else if (event === 'error') toast(`YOUTUBE DOWNLOAD FAILED: ${trackLabel(track).toUpperCase()}`, true);
 }
+
+// The strip/badges above are driven by live /ws pushes, but a push can be
+// missed — e.g. a cached video resolves 'queued'→'ready' server-side within
+// milliseconds, faster than this tab's fetch() for the add request even
+// returns — leaving a job stuck (or never shown) with nothing to correct
+// it. Reconcile against the server's authoritative queue as a safety net:
+// on a short timer, and once right after adding, so newly queued jobs show
+// up immediately instead of waiting for the next tick.
+let ytReconcileBusy = false;
+async function reconcileYoutubeQueue() {
+  if (ytReconcileBusy) return;
+  ytReconcileBusy = true;
+  try {
+    const queue = await api('/api/youtube/queue');
+    const serverJobs = new Map((queue.jobs || []).map((job) => [job.videoId, job]));
+    let changed = false;
+    for (const [videoId, job] of serverJobs) {
+      if (ytJobs.get(videoId)?.status !== job.status) changed = true;
+      ytJobs.set(videoId, job);
+    }
+    for (const [videoId, job] of [...ytJobs]) {
+      if (job.status !== 'error' && !serverJobs.has(videoId)) { ytJobs.delete(videoId); changed = true; }
+    }
+    renderYtProgress();
+    if (changed) renderTracks();
+  } catch { /* try again on the next tick */ }
+  finally { ytReconcileBusy = false; }
+}
+setInterval(reconcileYoutubeQueue, 4000);
 
 function paintLiveState() {
   const status = liveState?.status || 'stopped';
@@ -1271,12 +1304,7 @@ async function boot() {
     renderTracks();
     requestAnimationFrame(() => els.trackList.querySelector(`li[data-index="${requestedTrack}"]`)?.scrollIntoView({ block: 'center' }));
   }
-  try {
-    const queue = await api('/api/youtube/queue');
-    ytJobs = new Map((queue.jobs || []).map((job) => [job.videoId, job]));
-    renderYtProgress();
-    renderTracks();
-  } catch { /* background downloads just won't show progress until the next /ws event */ }
+  await reconcileYoutubeQueue();
   connectWebSocket();
 }
 
