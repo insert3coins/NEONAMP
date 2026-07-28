@@ -528,9 +528,10 @@ function mediaApiUrl(endpoint, t) {
   if (t.storage === 'path' && t.sourceId) q.set('source', t.sourceId);
   return `/api/${endpoint}?${q}`;
 }
-function setArt(track) {
+function setArt(track, bustCache = false) {
   if (!track?.file || track.storage === 'radio') { artEl.classList.add('hidden'); artEl.removeAttribute('src'); return; }
-  artEl.src = mediaApiUrl('art', track);
+  const url = mediaApiUrl('art', track);
+  artEl.src = bustCache ? `${url}&v=${Date.now()}` : url;
 }
 
 // ── deck rendering ──────────────────────────────────────
@@ -853,6 +854,7 @@ function connect() {
     try { msg = JSON.parse(ev.data); } catch { return; }
     lastMsgAt = Date.now();
     if (msg.type === 'theme' && !THEMEP && THEMES[msg.name]) { applyTheme(msg.name); return; }
+    if (msg.type === 'cmd' && msg.cmd === 'track-metadata') { applyTrackMetadataUpdate(msg); return; }
     if (msg.type === 'cmd' && msg.cmd === 'apply-settings') { applyRemoteObsSettings(msg.settings); return; }
     if (msg.type === 'cmd' && msg.cmd === 'rename-playlist') { renameObsPlaylist(msg); return; }
     if (msg.type === 'state') applyState(msg);
@@ -1007,6 +1009,31 @@ function applyRemoteObsSettings(settings) {
   applyPrefs(settings);
 }
 
+function applyTrackMetadataUpdate(message) {
+  if (!message.trackKey || !message.track || typeof message.track !== 'object') return;
+
+  if (PLAYMODE) {
+    let currentChanged = false;
+    queue = queue.map((track, index) => {
+      if (trackKey(track) !== message.trackKey) return track;
+      if (index === qi) currentChanged = true;
+      return { ...track, ...message.track };
+    });
+    if (currentChanged) {
+      const status = state?.status || (audio && !audio.paused ? 'playing' : 'paused');
+      localState(status, queue[qi]);
+      if (message.artworkChanged === true) setArt(queue[qi], true);
+      return;
+    }
+  }
+
+  if (state && trackKey(state) === message.trackKey) {
+    const updated = { ...state, ...message.track, type: 'state' };
+    applyState(updated);
+    if (message.artworkChanged === true) setArt(updated, true);
+  }
+}
+
 function renameObsPlaylist({ from, to }) {
   if (!from || !to || activeQueueName !== from) return;
   const savedStatus = state?.status || (audio && !audio.paused ? 'playing' : 'paused');
@@ -1098,6 +1125,7 @@ function jukeboxWs() {
       return;
     }
     if (msg.type !== 'cmd') return;   // jukebox is authoritative; ignore state/fft echoes
+    if (msg.cmd === 'track-metadata') { applyTrackMetadataUpdate(msg); return; }
     if (msg.cmd === 'apply-settings') { applyRemoteObsSettings(msg.settings); return; }
     if (msg.cmd === 'rename-playlist') { renameObsPlaylist(msg); return; }
     if (msg.cmd === 'load-playlist') { loadPlaylistCommand(msg); return; }

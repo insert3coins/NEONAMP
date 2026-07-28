@@ -169,7 +169,16 @@ OBS jukebox loads the same chain.
 
 **EDIT METADATA** on a local track writes to `<file>.neonamp.json`
 (title/artist/album/genre/year/art up to 2MB) — embedded tags and
-audio bytes stay untouched. Resetting removes the sidecar.
+audio bytes stay untouched. Resetting removes the sidecar. Saves and
+resets update a currently playing track, its artwork, the OBS feed, and
+the remote now-playing display immediately without restarting playback.
+
+Player preferences are persisted in `settings.json`: volume/balance,
+shuffle/repeat, EQ, DSP effects, normalization, crossfade, theme,
+visualizer, elapsed/remaining time mode, and open panels. OBS hydrates the
+same persisted theme, visualizer, audio processing, and playback settings
+after a server or application restart unless its URL explicitly pins an
+override such as `?theme=`, `?vis=`, `?vol=`, `?shuffle`, or `?eq`.
 
 ## Visualizers
 

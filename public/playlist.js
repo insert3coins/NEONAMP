@@ -1393,6 +1393,16 @@ function connectWebSocket() {
       updateControlStatus('DECK SYNCED');
     } else if (message.type === 'theme' && message.name) {
       applyControlSettings({ theme: message.name });
+    } else if (message.type === 'cmd' && message.cmd === 'track-metadata') {
+      if (message.trackKey && message.track) {
+        let changed = false;
+        tracks = tracks.map((track) => {
+          if (trackKey(track) !== message.trackKey) return track;
+          changed = true;
+          return { ...track, ...message.track };
+        });
+        if (changed) renderTracks();
+      }
     } else if (message.type === 'cmd' && message.cmd === 'apply-settings') {
       applyControlSettings(message.settings);
       updateControlStatus('LIVE APPLIED');

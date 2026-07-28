@@ -1253,19 +1253,20 @@ function setMarquee(text) {
 function artUrl(t) {
   return mediaApiUrl('art', t);
 }
-function setArt(t) {
+function setArt(t, bustCache = false) {
   if (!t || t.storage === 'radio') { els.art.classList.add('hidden'); els.art.removeAttribute('src'); return; }
-  els.art.src = artUrl(t);
+  const url = artUrl(t);
+  els.art.src = bustCache ? `${url}&v=${Date.now()}` : url;
 }
 els.art.addEventListener('load', () => els.art.classList.remove('hidden'));
 els.art.addEventListener('error', () => els.art.classList.add('hidden'));
 
-function updateMeta(t) {
+function updateMeta(t, bustArtworkCache = false) {
   els.kbps.textContent = t && t.bitrate ? `${t.bitrate} KBPS` : '--- KBPS';
   els.khz.textContent = t && t.sampleRate ? `${Math.round(t.sampleRate / 1000)} KHZ` : '-- KHZ';
   els.chan.textContent = t && t.channels === 1 ? 'MONO' : 'STEREO';
   [els.kbps, els.khz, els.chan].forEach((el) => el.classList.toggle('lit', !!t));
-  setArt(t);
+  setArt(t, bustArtworkCache);
 }
 
 function setPlayState(state) {
@@ -2346,6 +2347,7 @@ function sessionPayload() {
     theme: themeName,
     normalize,
     xfade: xfadeSeconds,
+    showRemain,
     panels: {
       eq: !els.eqPanel.classList.contains('collapsed'),
       pl: !els.plPanel.classList.contains('collapsed')
@@ -2424,6 +2426,7 @@ async function restoreSession() {
   if (typeof s.theme === 'string' && THEMES[s.theme]) applyTheme(s.theme, true);
   if (typeof s.normalize === 'boolean') { normalize = s.normalize; applyNormGain(); }
   if (XFADE_STEPS.includes(Number(s.xfade))) { xfadeSeconds = Number(s.xfade); paintXfade(); }
+  if (typeof s.showRemain === 'boolean') showRemain = s.showRemain;
   if (typeof s.obsEq === 'boolean') { obsEq = s.obsEq; els.btnEqObs.classList.toggle('active', obsEq); }
   if (s.dsp?.modules) {
     dspModules = sanitizeDspModules(s.dsp.modules);
@@ -2666,6 +2669,7 @@ els.btnXfade.addEventListener('click', () => {
 els.timeMain.addEventListener('click', () => {
   showRemain = !showRemain;
   audio.dispatchEvent(new Event('timeupdate'));
+  scheduleSession();
 });
 
 els.vis.addEventListener('click', cycleVis);
@@ -2938,6 +2942,29 @@ function renameLoadedPlaylist({ from, to }) {
   toast(`PLAYLIST RENAMED: ${from.toUpperCase()} → ${to.toUpperCase()}`);
 }
 
+function applyTrackMetadataUpdate(message) {
+  if (!message.trackKey || !message.track || typeof message.track !== 'object') return;
+  let changed = false;
+  let currentChanged = false;
+  pl = pl.map((track, index) => {
+    if (trackKey(track) !== message.trackKey) return track;
+    changed = true;
+    if (index === cur) currentChanged = true;
+    return { ...track, ...message.track };
+  });
+  if (!changed) return;
+  renderPlaylist();
+  scheduleSession();
+  if (!currentChanged || cur < 0) return;
+  const track = pl[cur];
+  setMarquee(`${trackLabel(track)}  ::  NEONAMP`);
+  updateMeta(track, message.artworkChanged === true);
+  document.title = `${trackLabel(track)} — NEONAMP`;
+  // Refresh the OBS feed, Twitch !song source, and remote manager's
+  // now-playing strip without reloading or seeking the audio element.
+  sendState();
+}
+
 function handleYoutubeEvent(msg) {
   const { event, videoId, playlist, title, error, percent, phase, bytes, meta } = msg;
   if (!videoId) return;
@@ -3037,6 +3064,7 @@ function wsConnect() {
       return;
     }
     if (msg.type !== 'cmd') return;
+    if (msg.cmd === 'track-metadata') { applyTrackMetadataUpdate(msg); return; }
     if (msg.cmd === 'apply-settings') { applyRemoteSettings(msg.settings); return; }
     if (msg.cmd === 'rename-playlist') { renameLoadedPlaylist(msg); return; }
     if (msg.cmd === 'load-playlist') { loadPlaylistCommand(msg); return; }
@@ -3156,9 +3184,6 @@ setInterval(() => {
   if (Date.now() - lastStateSent >= 5000) sendState();
 }, 5000);
 
-wsConnect();
-
-
 // ------------------------------------------------------------
 // Boot
 // ------------------------------------------------------------
@@ -3180,6 +3205,10 @@ window.addEventListener('resize', sizeSeekWave);
   renderPlaylist();
   setMarquee('NEONAMP READY ▞▞ PRESS EJECT FOR PLAYLIST MANAGER ▞▞ COIN-OPERATED AUDIO');
   await restoreSession();
+  // Restore before opening /ws. Connecting first sent default state to the
+  // server's position writer while /api/session was still being read, which
+  // could race the file and make the whole UI boot with default settings.
+  wsConnect();
   syncDesktopWindowSize();
   sendPrefs();
   armGestureHooks();

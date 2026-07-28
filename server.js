@@ -25,7 +25,42 @@ const PLAYLIST_DIR = path.join(__dirname, 'playlists');
 const PLAYLIST_MEDIA_DIR = path.join(__dirname, 'playlist-media');
 const YOUTUBE_DIR = path.join(__dirname, 'youtube-cache');
 const SETTINGS_FILE = path.join(__dirname, 'settings.json');
+const SETTINGS_TEMP_FILE = `${SETTINGS_FILE}.${process.pid}.tmp`;
 const RADIO_FILE = path.join(__dirname, 'radio-stations.json');
+
+// Queue every runtime settings operation. The deck, OBS jukebox, playlist
+// controls, and position heartbeat can all write this file at once; an
+// uncoordinated read during fs.writeFile's truncate/write window sees broken
+// JSON and makes startup restore fall back to defaults. The queue also stops
+// read-modify-write position updates from restoring an older preference set.
+let settingsFileChain = Promise.resolve();
+
+async function commitSettingsFile(settings) {
+  await fs.writeFile(SETTINGS_TEMP_FILE, JSON.stringify(settings, null, 2), 'utf8');
+  await fs.rename(SETTINGS_TEMP_FILE, SETTINGS_FILE);
+}
+
+async function readSettingsFile(fallback = {}) {
+  await settingsFileChain;
+  return readJsonFile(SETTINGS_FILE, fallback);
+}
+
+function replaceSettingsFile(settings) {
+  const operation = settingsFileChain.then(() => commitSettingsFile(settings));
+  settingsFileChain = operation.catch(() => {});
+  return operation;
+}
+
+function updateSettingsFile(mutator) {
+  const operation = settingsFileChain.then(async () => {
+    const current = await readJsonFile(SETTINGS_FILE, {});
+    const updated = await mutator(current) || current;
+    await commitSettingsFile(updated);
+    return updated;
+  });
+  settingsFileChain = operation.catch(() => {});
+  return operation;
+}
 
 const AUDIO_EXT = new Set([
   '.mp3', '.ogg', '.oga', '.wav', '.flac', '.m4a', '.aac', '.opus', '.webm'
@@ -1051,6 +1086,18 @@ app.get('/api/metadata', async (req, res) => {
   } catch { res.status(404).json({ error: 'Track not found' }); }
 });
 
+function metadataTrack(ref, info) {
+  return {
+    ...info, storage: ref.storage,
+    ...(ref.playlist ? { playlist: ref.playlist } : {}),
+    ...(ref.sourceId ? { sourceId: ref.sourceId } : {})
+  };
+}
+
+function broadcastTrackMetadata(ref, track, artworkChanged) {
+  broadcastCmd('track-metadata', { trackKey: ref.key, track, artworkChanged });
+}
+
 app.put('/api/metadata', async (req, res) => {
   const ref = requestTrackRef(req);
   if (!ref) return res.status(400).json({ error: 'Invalid track source' });
@@ -1077,7 +1124,9 @@ app.put('/api/metadata', async (req, res) => {
   try {
     await fs.writeFile(sidecarPath(ref.full), JSON.stringify(next, null, 2), 'utf8');
     const info = await trackInfo(ref.full, ref.rel);
-    res.json({ ok: true, track: { ...info, storage: ref.storage, ...(ref.playlist ? { playlist: ref.playlist } : {}), ...(ref.sourceId ? { sourceId: ref.sourceId } : {}) } });
+    const track = metadataTrack(ref, info);
+    broadcastTrackMetadata(ref, track, 'artwork' in (req.body || {}));
+    res.json({ ok: true, track });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1087,7 +1136,9 @@ app.delete('/api/metadata', async (req, res) => {
   try {
     await fs.unlink(sidecarPath(ref.full));
     const info = await trackInfo(ref.full, ref.rel);
-    res.json({ ok: true, track: { ...info, storage: ref.storage, ...(ref.playlist ? { playlist: ref.playlist } : {}), ...(ref.sourceId ? { sourceId: ref.sourceId } : {}) } });
+    const track = metadataTrack(ref, info);
+    broadcastTrackMetadata(ref, track, true);
+    res.json({ ok: true, track });
   } catch { res.status(404).json({ error: 'No custom metadata exists for this track' }); }
 });
 
@@ -2298,12 +2349,10 @@ app.post('/api/playlists/:name/activate', async (req, res) => {
     if (!data.tracks.length) return res.status(409).json({ error: 'Playlist is empty' });
     const index = Math.max(0, Math.min(data.tracks.length - 1, Number(req.body?.index) || 0));
     const play = req.body?.play !== false;
-    const settings = await readJsonFile(SETTINGS_FILE, {});
-    settings.name = name;
-    settings.tracks = data.tracks;
-    settings.sel = index;
-    settings.position = { idx: index, t: 0, state: play ? 'play' : 'stop' };
-    await writeJsonFile(SETTINGS_FILE, settings);
+    await updateSettingsFile((settings) => ({
+      ...settings, name, tracks: data.tracks, sel: index,
+      position: { idx: index, t: 0, state: play ? 'play' : 'stop' }
+    }));
     broadcastCmd('load-playlist', { name, index, play });
     res.json({ ok: true, name, index, play, count: data.tracks.length });
   } catch (err) {
@@ -2344,16 +2393,15 @@ app.post('/api/playlists/:name/rename', async (req, res) => {
     sourceRemoved = true;
 
     try {
-      const settings = await readJsonFile(SETTINGS_FILE, {});
-      if (settings.name === from) {
-        settings.name = to;
-        if (Array.isArray(settings.tracks)) {
-          settings.tracks = settings.tracks.map((track) =>
+      await updateSettingsFile((settings) => {
+        if (settings.name !== from) return settings;
+        return {
+          ...settings, name: to,
+          tracks: Array.isArray(settings.tracks) ? settings.tracks.map((track) =>
             track?.storage === 'playlist' && track.playlist === from ? { ...track, playlist: to } : track
-          );
-        }
-        await writeJsonFile(SETTINGS_FILE, settings);
-      }
+          ) : settings.tracks
+        };
+      });
     } catch (err) { console.warn(`  renamed playlist but could not update active session: ${err.message}`); }
     broadcastCmd('rename-playlist', { from, to });
     res.json({ ok: true, from, to, playlist: exposedPlaylist(data, to) });
@@ -2374,15 +2422,16 @@ app.delete('/api/playlists/:name', async (req, res) => {
     await fs.rm(path.join(PLAYLIST_MEDIA_DIR, name), { recursive: true, force: true });
     await fs.unlink(path.join(PLAYLIST_DIR, `${name}.json`));
     await pruneYoutubeCache(doomed?.tracks, name).catch(() => {});
-    const settings = await readJsonFile(SETTINGS_FILE, {});
-    if (settings.name === name) {
-      settings.name = '';
-      settings.tracks = [];
-      settings.sel = -1;
-      settings.position = { idx: -1, t: 0, state: 'stop' };
-      await writeJsonFile(SETTINGS_FILE, settings);
-      broadcastCmd('clear-playlist', { name });
-    }
+    let clearedActive = false;
+    await updateSettingsFile((current) => {
+      if (current.name !== name) return current;
+      clearedActive = true;
+      return {
+        ...current, name: '', tracks: [], sel: -1,
+        position: { idx: -1, t: 0, state: 'stop' }
+      };
+    });
+    if (clearedActive) broadcastCmd('clear-playlist', { name });
     res.json({ ok: true });
   } catch {
     res.status(404).json({ error: 'Playlist not found' });
@@ -2396,7 +2445,7 @@ app.delete('/api/playlists/:name', async (req, res) => {
 // ------------------------------------------------------------
 async function readSettings(req, res) {
   try {
-    const settings = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
+    const settings = await readSettingsFile({});
     if (Array.isArray(settings.tracks)) {
       settings.tracks = settings.tracks.map((track) => track?.storage === 'path' ? filepathTrack(track) : track);
     }
@@ -2411,7 +2460,7 @@ async function writeSettings(req, res) {
     if (Array.isArray(settings.tracks)) {
       settings.tracks = settings.tracks.map((track) => track?.storage === 'path' ? filepathTrack(track) : track);
     }
-    await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+    await replaceSettingsFile(settings);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2489,9 +2538,7 @@ app.post('/api/control', async (req, res) => {
   if (!cmd && !Object.keys(update).length) return res.status(400).json({ error: 'No valid control changes' });
   try {
     if (Object.keys(update).length) {
-      const settings = await readJsonFile(SETTINGS_FILE, {});
-      Object.assign(settings, update);
-      await writeJsonFile(SETTINGS_FILE, settings);
+      await updateSettingsFile((settings) => ({ ...settings, ...update }));
       broadcastCmd('apply-settings', { settings: update });
     }
     if (cmd) broadcastCmd(cmd);
@@ -3258,13 +3305,14 @@ async function writePositionFromState(s, throttleMs) {
   posKey = key;
   posSavedAt = now;
   try {
-    const cur = await readJsonFile(SETTINGS_FILE, {});
-    cur.position = {
-      idx: typeof s.idx === 'number' ? s.idx : -1,
-      t: Math.floor((s.t || 0) * 10) / 10,
-      state: s.status === 'playing' ? 'play' : s.status === 'paused' ? 'pause' : 'stop'
-    };
-    await writeJsonFile(SETTINGS_FILE, cur);
+    await updateSettingsFile((settings) => ({
+      ...settings,
+      position: {
+        idx: typeof s.idx === 'number' ? s.idx : -1,
+        t: Math.floor((s.t || 0) * 10) / 10,
+        state: s.status === 'playing' ? 'play' : s.status === 'paused' ? 'pause' : 'stop'
+      }
+    }));
   } catch { /* next tick */ }
 }
 
@@ -3285,6 +3333,7 @@ async function persistJukePosition(s) {
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     try {
+      await settingsFileChain;
       if (loudDirty && loudCache) await writeJsonFile(LOUDNESS_CACHE_FILE, loudCache);
       if (playCountsDirty) await writeJsonFile(PLAY_COUNTS_FILE, Object.fromEntries(playCounts));
     } catch { /* best effort */ }
@@ -3295,8 +3344,12 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 const wss = new WebSocketServer({ server, path: '/ws' });
 const wssRef = wss;
 let lastState = null;
-let lastTheme = null;
-let lastPrefs = null;
+const persistedWsSettings = await readSettingsFile({});
+const persistedControlSettings = sanitizedControlSettings(persistedWsSettings);
+let lastTheme = CONTROL_THEMES.has(persistedWsSettings.theme)
+  ? { type: 'theme', name: persistedWsSettings.theme } : null;
+let lastPrefs = Object.keys(persistedControlSettings).length
+  ? { type: 'prefs', ...persistedControlSettings } : null;
 
 wss.on('connection', (sock) => {
   sock.isAlive = true;
@@ -3315,7 +3368,7 @@ wss.on('connection', (sock) => {
     try { msg = JSON.parse(raw); } catch { return; }
     if (msg.type === 'state') { lastState = msg; maybeAnnounceTrack(msg); persistJukePosition(msg); maybeCountPlay(msg); }
     else if (msg.type === 'theme') { lastTheme = msg; }
-    else if (msg.type === 'prefs') { lastPrefs = msg; }
+    else if (msg.type === 'prefs') { lastPrefs = { ...(lastPrefs || {}), ...msg, type: 'prefs' }; }
     else if (msg.type !== 'fft') return;
     const data = JSON.stringify(msg);
     for (const c of wss.clients) {

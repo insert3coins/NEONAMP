@@ -28,6 +28,7 @@
 # ── runtime state and caches ──────────────────────────────────────────
 # Queue, track position, volume, EQ curve — rewritten every few seconds.
 /settings.json
+/settings.json.*.tmp
 /loudness-cache.json
 /play-counts.json
 /waveform-cache.json
