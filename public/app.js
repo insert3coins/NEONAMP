@@ -1995,15 +1995,34 @@ els.vol.addEventListener('input', () => { applyVolume(); scheduleSession(); });
 els.bal.addEventListener('input', () => { applyBalance(); scheduleSession(); });
 els.bal.addEventListener('dblclick', () => { els.bal.value = 0; applyBalance(); scheduleSession(); });
 
+// Desktop shell only — window.ipc is the wry/WebView2 bridge ui.rs sets up;
+// plain browser tabs never have it, so this is a silent no-op there. EQ and
+// playlist panels collapsing changes the deck's natural height, and with no
+// page around it to absorb the difference (see ui.rs's trimmed backdrop),
+// the native window should track it rather than leave dead space or clip
+// the playlist.
+function syncDesktopWindowSize() {
+  if (!(window.ipc && window.ipc.postMessage)) return;
+  const stage = document.querySelector('.stage');
+  const amp = document.querySelector('.amp');
+  if (!stage || !amp) return;
+  const cs = getComputedStyle(stage);
+  const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  const h = Math.ceil(amp.getBoundingClientRect().height + pad);
+  window.ipc.postMessage('resize:' + h);
+}
+
 els.btnEqToggle.addEventListener('click', () => {
   els.eqPanel.classList.toggle('collapsed');
   els.btnEqToggle.classList.toggle('active', !els.eqPanel.classList.contains('collapsed'));
+  syncDesktopWindowSize();
   scheduleSession();
 });
 els.btnPlToggle.addEventListener('click', () => {
   setTimeout(() => scrollCurrentIntoView('nearest'), 0);
   els.plPanel.classList.toggle('collapsed');
   els.btnPlToggle.classList.toggle('active', !els.plPanel.classList.contains('collapsed'));
+  syncDesktopWindowSize();
   scheduleSession();
 });
 els.btnEqOn.addEventListener('click', () => setEqOn(!eqOn));
@@ -2376,6 +2395,7 @@ window.addEventListener('resize', sizeVis);
   renderPlaylist();
   setMarquee('NEONAMP READY ▞▞ PRESS EJECT FOR PLAYLIST MANAGER ▞▞ COIN-OPERATED AUDIO');
   await restoreSession();
+  syncDesktopWindowSize();
   sendPrefs();
   armGestureHooks();
   if (new URLSearchParams(location.search).get('twitch') === 'connected') {

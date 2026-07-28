@@ -183,7 +183,18 @@ pub const INIT_SCRIPT: &str = r#"
       'html { user-select: none; -webkit-user-select: none; }',
       'input, textarea, select, [contenteditable], [contenteditable] * {',
       '  user-select: text; -webkit-user-select: text; }',
-      'img { -webkit-user-drag: none; }'
+      'img { -webkit-user-drag: none; }',
+
+      /* The deck's own backdrop (.stage) is sized for a browser tab: gradient
+         glow, perspective floor grid, generous padding so the amp reads as a
+         thing floating on a page. In this window there is no page — the
+         window IS the amp — so that padding is just dead space the user has
+         to resize past, and the deck stack itself is the only thing that
+         still needs somewhere to grab and drag from. Trim it down to a
+         sliver (room for the deck's drop-shadow, nothing else) and drop the
+         gradient/grid entirely; main.rs sizes the window to match. */
+      '.stage { padding: 14px 10px !important; background: none !important; }',
+      '.stage::before { display: none !important; }'
     ].join('\n');
     document.head.appendChild(css);
   }

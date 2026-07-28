@@ -21,8 +21,13 @@ use wry::{NewWindowResponse, ScrollBarStyle, WebViewBuilder, WebViewBuilderExtWi
 
 use hittest::{Edge, hit_test};
 
-/// Deck width (476px) plus the stage's side padding.
-const DEFAULT_SIZE: (f64, f64) = (520.0, 860.0);
+/// Deck width (476px) plus the trimmed stage padding `ui.rs`'s injected
+/// style applies in this shell (14px/10px, not the browser's 28px/60px —
+/// there's no page here for that padding to breathe on, just a window).
+/// Height is the deck's natural stacked height with EQ + playlist expanded
+/// (the default state), 914px, plus that same trimmed padding: ~942px,
+/// rounded up a little for cross-system font-metrics slop.
+const DEFAULT_SIZE: (f64, f64) = (500.0, 950.0);
 const MIN_SIZE: (f64, f64) = (420.0, 340.0);
 /// `--void`, so resizing never flashes white behind the page.
 const VOID: (u8, u8, u8, u8) = (0x07, 0x04, 0x0f, 0xff);
@@ -50,6 +55,9 @@ pub enum UserEvent {
         x: i32,
         y: i32,
     },
+    /// The deck's own content height changed (EQ/playlist panel toggled) —
+    /// resize to match, width untouched. Logical px.
+    ResizeHeight(u32),
     ServerUp,
     ServerDown,
 }
@@ -100,6 +108,10 @@ fn main() -> wry::Result<()> {
             },
             "hover" => match read_point(&mut parts) {
                 Some((x, y)) => UserEvent::Hover { x, y },
+                None => return,
+            },
+            "resize" => match parts.next().and_then(|h| h.parse().ok()) {
+                Some(h) => UserEvent::ResizeHeight(h),
                 None => return,
             },
             _ => return,
@@ -167,6 +179,16 @@ fn main() -> wry::Result<()> {
 
             Event::UserEvent(UserEvent::Hover { x, y }) => {
                 hit_test(window.inner_size(), x, y, window.scale_factor()).apply_cursor(&window);
+            }
+
+            Event::UserEvent(UserEvent::ResizeHeight(h)) => {
+                // Width is whatever the user last set it to (drag-resize or
+                // otherwise) — only height tracks the panel toggle, since
+                // that's the only axis EQ/playlist collapsing affects.
+                let scale = window.scale_factor();
+                let width = window.inner_size().to_logical::<f64>(scale).width;
+                let height = (h as f64).clamp(MIN_SIZE.1, 4000.0);
+                window.set_inner_size(LogicalSize::new(width, height));
             }
 
             Event::UserEvent(UserEvent::ServerUp) => {
