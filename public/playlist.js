@@ -85,6 +85,13 @@ function fmtTime(value) {
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function formatBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+}
+
 function trackLabel(track) {
   return track?.artist ? `${track.artist} — ${track.title || 'Unknown'}` : (track?.title || 'Unknown track');
 }
@@ -359,6 +366,10 @@ async function loadPlaylist(name, quiet = false) {
     setDirty(false);
     renderPlaylists();
     renderTracks();
+    // The selected playlist may contain a request that was approved while
+    // another playlist was open. Pull the authoritative job snapshot now
+    // rather than waiting for the four-second safety-net interval.
+    reconcileYoutubeQueue();
     document.title = `${currentName} — NEONAMP PLAYLIST CONTROL`;
     if (!quiet) toast(`OPENED "${currentName}"`);
   } catch (error) { toast('OPEN FAILED: ' + error.message, true); }
@@ -879,6 +890,7 @@ function approveRequestDialog(index = selected) {
       await api(`/api/playlists/${encodeURIComponent(currentName)}/requests/${encodeURIComponent(track.videoId)}/approve`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target })
       });
+      await reconcileYoutubeQueue();
       closeModal();
       tracks.splice(index, 1);
       selected = Math.min(index, tracks.length - 1);
@@ -1430,7 +1442,8 @@ function renderYtProgress() {
   if (downloading) {
     const icon = downloading.phase === 'converting' ? '⚙' : '⬇';
     const label = downloading.phase === 'converting' ? 'CONVERTING' : 'DOWNLOADING';
-    const pct = Number.isFinite(downloading.percent) ? ` ${downloading.percent}%` : '';
+    const pct = Number.isFinite(downloading.percent) ? ` ${downloading.percent}%`
+      : (downloading.phase !== 'converting' && Number.isFinite(downloading.bytes)) ? ` ${formatBytes(downloading.bytes)}` : '';
     parts.push(`${icon} ${label}: ${(downloading.title || 'UNTITLED').toUpperCase()}${pct}`);
   }
   if (queuedCount) parts.push(`${queuedCount} QUEUED`);
@@ -1458,7 +1471,11 @@ function youtubeKindText(job, track) {
   if (!job) return (track.requestedBy && track.downloaded !== true) ? 'AWAITING APPROVAL' : site;
   if (job.status === 'downloading') {
     const label = job.phase === 'converting' ? 'CONVERTING' : 'DOWNLOADING';
-    return `${label}${Number.isFinite(job.percent) ? ` ${job.percent}%` : ''}`;
+    if (Number.isFinite(job.percent)) return `${label} ${job.percent}%`;
+    // No real total size yet (or ever, for some formats) — a live byte
+    // count is still better than a label that just sits there unchanged.
+    if (job.phase !== 'converting' && Number.isFinite(job.bytes)) return `${label} ${formatBytes(job.bytes)}`;
+    return label;
   }
   if (job.status === 'queued') return 'QUEUED';
   if (job.status === 'error') return 'FAILED';
@@ -1469,26 +1486,33 @@ function youtubeKindText(job, track) {
 // the affected row's badge text (instead of a full renderTracks()) keeps
 // that smooth instead of rebuilding the whole list on every tick.
 function updateYoutubeRowBadge(videoId) {
-  const index = tracks.findIndex((t) => t.storage === 'youtube' && t.videoId === videoId);
-  if (index < 0) return;
-  const kind = els.trackList.querySelector(`li[data-index="${index}"] .kind`);
-  if (kind) kind.textContent = youtubeKindText(ytJobs.get(videoId), tracks[index]);
+  tracks.forEach((track, index) => {
+    if (track.storage !== 'youtube' || track.videoId !== videoId) return;
+    const kind = els.trackList.querySelector(`li[data-index="${index}"] .kind`);
+    if (kind) kind.textContent = youtubeKindText(ytJobs.get(videoId), track);
+  });
 }
 
 function handleYoutubeEvent(message) {
-  const { event, videoId, playlist, title, error, percent, phase, meta } = message;
+  const { event, videoId, playlist, title, error, percent, phase, bytes, meta } = message;
   if (event === 'ready') {
     ytJobs.delete(videoId);
   } else if (event === 'progress') {
     // A progress tick doesn't carry a status of its own — it's always
     // mid-download — so patch the percent/phase onto whatever's already
-    // there rather than replacing the job.
-    ytJobs.set(videoId, { ...(ytJobs.get(videoId) || { status: 'downloading', playlist, title }), percent, phase });
+    // there rather than replacing the job. `bytes` is a fallback for when
+    // the real total size isn't known yet (or ever, for some formats) —
+    // see downloadRawAudio server-side.
+    ytJobs.set(videoId, { ...(ytJobs.get(videoId) || { status: 'downloading', playlist, title }), percent, phase, bytes });
   } else {
     ytJobs.set(videoId, { status: event, playlist, title, error });
   }
   renderYtProgress();
-  if (playlist !== currentName) return;
+  // A cache job is keyed by videoId and can be shared by multiple
+  // playlists. Approved requests can also move while events are already
+  // in flight, so the event's original playlist name is not a reliable
+  // way to decide whether the currently visible row needs repainting.
+  if (!tracks.some((t) => t.storage === 'youtube' && t.videoId === videoId)) return;
   if (event === 'progress') { updateYoutubeRowBadge(videoId); return; }
   if (event === 'ready') {
     // A batch/set add only had sparse placeholder metadata for some sites —
@@ -1524,7 +1548,10 @@ async function reconcileYoutubeQueue() {
     const serverJobs = new Map((queue.jobs || []).map((job) => [job.videoId, job]));
     let changed = false;
     for (const [videoId, job] of serverJobs) {
-      if (ytJobs.get(videoId)?.status !== job.status) changed = true;
+      const previous = ytJobs.get(videoId);
+      if (!previous || previous.status !== job.status || previous.phase !== job.phase
+          || previous.percent !== job.percent || previous.bytes !== job.bytes
+          || previous.error !== job.error || previous.playlist !== job.playlist) changed = true;
       ytJobs.set(videoId, job);
     }
     for (const [videoId, job] of [...ytJobs]) {

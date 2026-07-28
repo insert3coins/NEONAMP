@@ -157,7 +157,7 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 .select { min-height: 29px; border: 1px solid var(--line2); background: var(--inset); color: var(--dim); padding: 4px 7px; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
 .select:disabled { opacity: .32; }
 .tracktable { flex: 1; min-height: 0; margin: 0 16px; position: relative; display: flex; flex-direction: column; border: 1px solid var(--line); background: var(--inset); }
-.trackhead, .tracklist li { display: grid; grid-template-columns: 44px minmax(200px, 2fr) minmax(110px, 1fr) 70px 60px; align-items: center; }
+.trackhead, .tracklist li { display: grid; grid-template-columns: 44px minmax(200px, 2fr) minmax(110px, 1fr) 100px 60px; align-items: center; }
 .trackhead { flex: 0 0 auto; min-height: 28px; padding: 0 9px; border-bottom: 1px solid var(--line); color: var(--dim); font-size: 7.5px; letter-spacing: 1.2px; }
 .tracklist { list-style: none; counter-reset: track; margin: 0; padding: 0; overflow-y: auto; min-height: 0; }
 .tracklist li { min-height: 43px; padding: 5px 9px; border-bottom: 1px solid rgba(43,35,80,.52); cursor: pointer; counter-increment: track; }
@@ -170,6 +170,7 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 .trackname { display: grid; }
 .trackname strong { overflow: hidden; text-overflow: ellipsis; font-size: 12px; letter-spacing: .3px; }
 .trackname small, .album, .kind, .duration { color: var(--dim); font-size: 9px; }
+.kind { white-space: nowrap; }
 .kind.radio { color: var(--mag); }
 .kind.youtube { color: var(--cyan); }
 .kind.youtube.pending { color: var(--amber); }
@@ -238,7 +239,7 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
   .rackmain { grid-template-columns: auto 1fr 1fr; align-items: end; }
   .racktoggles { justify-content: flex-end; }
   .soundgrid { grid-template-columns: 1fr; }
-  .trackhead, .tracklist li { grid-template-columns: 36px minmax(150px, 1fr) 62px 54px; }
+  .trackhead, .tracklist li { grid-template-columns: 36px minmax(150px, 1fr) 92px 54px; }
   .trackhead span:nth-child(3), .album { display: none; }
   .workhead { align-items: flex-start; }
   .mainactions { flex-direction: column; }

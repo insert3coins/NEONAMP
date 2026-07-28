@@ -118,12 +118,20 @@ URL. YouTube and SoundCloud are verified end-to-end; Mixcloud/Bandcamp
 ride the same `yt-dlp` path but are less tested. Audio-only —
 extracted into `youtube-cache/`, never touches video. The URL resolves
 instantly (dialog closes right away); downloads queue in the
-background one at a time, with a live percentage two ways: an amber
-status strip above the toolbar and each track's TYPE column
-(QUEUED / DOWNLOADING 42% / CONVERTING 67% / FAILED). Failed tracks
-stay FAILED — right-click for **Retry download**, or empty space for
+background one at a time, with live status two ways: an amber status
+strip above the toolbar and each track's TYPE column (QUEUED /
+DOWNLOADING / CONVERTING 67% / FAILED). Conversion always shows a real
+percentage; the download step shows one too once yt-dlp knows the
+file's real size, falling back to a live byte count (e.g. `1.2MB`)
+when it doesn't — some formats never report a total up front, and
+resolving the real download URL can itself take a few seconds with
+nothing to show yet. Failed tracks stay FAILED — right-click for
+**Retry download**, or empty space for
 **Retry all failed**. A playlist/set/album source auto-checks for new
 items every 6 hours (**Check for new videos** to trigger on demand).
+When an approved request is appended to the live player, its duration
+slot shows the same QUEUED / DOWNLOADING / CONVERTING / FAILED state
+until the audio is ready.
 Deleting a playlist reclaims its cache audio unless another playlist
 shares it. Requires `yt-dlp` on PATH.
 

@@ -24,6 +24,8 @@ let radioRetryTimer = null;
 let currentRadioTitle = '';
 let normalize = true;    // loudness normalization toggle
 let normGain = 0;        // dB gain for the current track
+let ytJobs = new Map();  // videoId -> current background download state
+let ytEventRevision = 0;
 
 const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
 const EQ_LABELS = ['60', '170', '310', '600', '1K', '3K', '6K', '12K', '14K', '16K'];
@@ -1616,6 +1618,49 @@ els.btnSleep.addEventListener('click', openSleepPicker);
 // ------------------------------------------------------------
 // Playlist rendering + mutations
 // ------------------------------------------------------------
+function formatDownloadBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function youtubeJobLabel(track) {
+  if (track?.storage !== 'youtube' || !track.videoId) return null;
+  const job = ytJobs.get(track.videoId);
+  if (!job) return null;
+  if (job.status === 'queued') return { text: 'QUEUED', className: 'yt-active' };
+  if (job.status === 'error') return { text: 'FAILED', className: 'yt-error', title: job.error || 'Download failed' };
+  if (job.status !== 'downloading') return null;
+  const label = job.phase === 'converting' ? 'CONVERTING' : 'DOWNLOADING';
+  const amount = Number.isFinite(job.percent) ? ` ${job.percent}%`
+    : (job.phase !== 'converting' && Number.isFinite(job.bytes)) ? ` ${formatDownloadBytes(job.bytes)}` : '';
+  return { text: label + amount, className: 'yt-active' };
+}
+
+function paintPlaylistDuration(li, track) {
+  const dur = li.querySelector('.dur');
+  if (!dur) return;
+  dur.classList.remove('yt-active', 'yt-error');
+  dur.removeAttribute('title');
+  const jobLabel = youtubeJobLabel(track);
+  if (jobLabel) {
+    dur.textContent = jobLabel.text;
+    dur.classList.add(jobLabel.className);
+    dur.title = jobLabel.title || `${trackLabel(track)} — ${jobLabel.text}`;
+    return;
+  }
+  dur.textContent = track.storage === 'radio' ? 'LIVE' : (track.duration ? fmtTime(track.duration) : '--:--');
+}
+
+function updateYoutubePlaylistRows(videoId) {
+  pl.forEach((track, index) => {
+    if (track?.storage !== 'youtube' || track.videoId !== videoId) return;
+    const li = els.plList.querySelector(`li[data-i="${index}"]`);
+    if (li) paintPlaylistDuration(li, track);
+  });
+}
+
 function renderPlaylist() {
   const list = els.plList;
   list.innerHTML = '';
@@ -1630,8 +1675,9 @@ function renderPlaylist() {
     li.innerHTML =
       `<span class="num">${String(i + 1).padStart(2, '0')}.</span>` +
       `<span class="name"></span>` +
-      `<span class="dur">${t.storage === 'radio' ? 'LIVE' : (t.duration ? fmtTime(t.duration) : '--:--')}</span>`;
+      '<span class="dur"></span>';
     li.querySelector('.name').textContent = trackLabel(t);
+    paintPlaylistDuration(li, t);
     list.appendChild(li);
   });
   els.plTotal.textContent = `${pl.length} TRK / ${fmtTime(total)}`;
@@ -2892,6 +2938,51 @@ function renameLoadedPlaylist({ from, to }) {
   toast(`PLAYLIST RENAMED: ${from.toUpperCase()} → ${to.toUpperCase()}`);
 }
 
+function handleYoutubeEvent(msg) {
+  const { event, videoId, playlist, title, error, percent, phase, bytes, meta } = msg;
+  if (!videoId) return;
+  ytEventRevision++;
+  if (event === 'ready') {
+    ytJobs.delete(videoId);
+    let changed = false;
+    pl = pl.map((track) => {
+      if (track?.storage !== 'youtube' || track.videoId !== videoId) return track;
+      changed = true;
+      return {
+        ...track,
+        downloaded: true,
+        ...(meta ? { title: meta.title, artist: meta.artist, duration: meta.duration } : {})
+      };
+    });
+    if (changed) scheduleSession();
+  } else if (event === 'progress') {
+    ytJobs.set(videoId, {
+      ...(ytJobs.get(videoId) || { status: 'downloading', playlist, title }),
+      status: 'downloading', percent, phase, bytes
+    });
+  } else {
+    ytJobs.set(videoId, { status: event, playlist, title, error, percent, phase, bytes });
+  }
+  if (event === 'progress') updateYoutubePlaylistRows(videoId);
+  else renderPlaylist();
+}
+
+let ytReconcileBusy = false;
+async function reconcileYoutubeQueue() {
+  if (ytReconcileBusy) return;
+  ytReconcileBusy = true;
+  const revision = ytEventRevision;
+  try {
+    const queue = await api('/api/youtube/queue');
+    // A live event received while this HTTP request was in flight is newer
+    // than the snapshot. Leave it alone; the next reconnect can reconcile.
+    if (revision !== ytEventRevision) return;
+    ytJobs = new Map((queue.jobs || []).map((job) => [job.videoId, job]));
+    renderPlaylist();
+  } catch { /* live WebSocket updates still work; retry on reconnect */ }
+  finally { ytReconcileBusy = false; }
+}
+
 function wsConnect() {
   clearTimeout(bwsTimer);
   let sock;
@@ -2907,6 +2998,7 @@ function wsConnect() {
     sendState();
     wsSend({ type: 'theme', name: themeName });
     sendPrefs();
+    reconcileYoutubeQueue();
   });
   sock.addEventListener('message', (ev) => {
     let msg;
@@ -2938,6 +3030,10 @@ function wsConnect() {
         waveformPeaks = msg.peaks;
         waveformState = 'ready';
       }
+      return;
+    }
+    if (msg.type === 'youtube') {
+      handleYoutubeEvent(msg);
       return;
     }
     if (msg.type !== 'cmd') return;

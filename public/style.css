@@ -469,7 +469,9 @@ input[type='range']::-moz-range-thumb {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pllist li .dur { color: var(--dim); }
+.pllist li .dur { flex: 0 0 auto; color: var(--dim); white-space: nowrap; }
+.pllist li .dur.yt-active { color: var(--amber); text-shadow: 0 0 6px rgba(var(--amber-rgb), .45); }
+.pllist li .dur.yt-error { color: var(--mag); text-shadow: 0 0 6px rgba(var(--mag-rgb), .45); }
 .pllist li.selected { outline: 1px solid var(--mag); outline-offset: -1px; background: rgba(var(--mag-rgb), .07); }
 .pllist li.current { color: var(--cyan); text-shadow: 0 0 6px rgba(var(--cyan-rgb), .55); }
 .pllist li.current .num::before { content: '▶'; margin-right: 4px; color: var(--mag); }

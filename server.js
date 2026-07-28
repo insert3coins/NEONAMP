@@ -507,7 +507,7 @@ async function findDownloadedFiles(rawStem) {
 
 async function downloadRawAudio(sourceUrl, rawStem, onUpdate) {
   const args = [
-    '-f', 'bestaudio/best', '--no-playlist', '--no-warnings', '--newline',
+    '-f', 'bestaudio/best', '--no-playlist', '--no-warnings', '--newline', '--progress',
     '--write-thumbnail', '--force-overwrites',
     '--progress-template', YT_DOWNLOAD_TEMPLATE,
     // A playlist/set's flat listing is fast but sparse — YouTube's includes
@@ -518,7 +518,10 @@ async function downloadRawAudio(sourceUrl, rawStem, onUpdate) {
     // --simulate and silently skips the actual download entirely (confirmed
     // by testing against an HLS-fragmented SoundCloud track — no error, no
     // file at all). "before_dl:" fires per-item right before its download
-    // starts and doesn't carry that implication.
+    // starts and doesn't carry that implication. Any --print also implies
+    // quiet mode, though, which suppresses progress output unless --progress
+    // is explicitly supplied above. Without it the file downloads normally
+    // but neither UI ever receives a percent tick.
     '--print', 'before_dl:NEONAMP-META %(title)s|||%(uploader,channel,artist)s|||%(duration)s',
     '-o', `${rawStem}.%(ext)s`,
     sourceUrl
@@ -531,6 +534,7 @@ async function downloadRawAudio(sourceUrl, rawStem, onUpdate) {
     let stderr = '';
     let buf = '';
     let lastPercent = -1;
+    let lastBytes = -1;
     let realMeta = null;
     const timer = setTimeout(() => child.kill(), 30 * 60 * 1000);
     child.stdout.on('data', (chunk) => {
@@ -547,6 +551,16 @@ async function downloadRawAudio(sourceUrl, rawStem, onUpdate) {
           if (percent !== null && percent !== lastPercent) {
             lastPercent = percent;
             onUpdate?.({ phase: 'downloading', percent });
+          } else if (percent === null && downloaded > 0 && downloaded !== lastBytes) {
+            // total_bytes/total_bytes_estimate are both still unknown —
+            // true for YouTube's own format-resolution window (can run
+            // several seconds before the real size is known) and for some
+            // adaptive/fragmented formats the whole way through. A raw
+            // byte count is real, live progress and beats a "DOWNLOADING"
+            // label that just sits there looking stuck for however long
+            // that takes.
+            lastBytes = downloaded;
+            onUpdate?.({ phase: 'downloading', bytes: downloaded });
           }
           continue;
         }
@@ -678,6 +692,7 @@ function broadcastYoutube(event, job, error) {
   const data = JSON.stringify({
     type: 'youtube', event, videoId: job.videoId, playlist: job.playlist, title: job.title,
     percent: Number.isFinite(job.percent) ? job.percent : null, phase: job.phase || null,
+    bytes: Number.isFinite(job.bytes) ? job.bytes : null,
     remaining, ...(job.correctedMeta ? { meta: job.correctedMeta } : {}), ...(error ? { error } : {})
   });
   for (const c of wssRef.clients) {
@@ -714,7 +729,8 @@ async function pumpYoutube() {
   try {
     const finalMeta = await downloadYoutubeAudio(job.videoId, job.meta, (update) => {
       job.phase = update.phase;
-      job.percent = update.percent;
+      if (update.percent !== undefined) job.percent = update.percent;
+      if (update.bytes !== undefined) job.bytes = update.bytes;
       broadcastYoutube('progress', job);
     });
     if (finalMeta) {
@@ -2201,7 +2217,7 @@ app.post('/api/playlists/:name/youtube/retry', async (req, res) => {
 // Snapshot of in-flight downloads, so a (re)loaded playlist manager can show
 // current progress immediately instead of waiting on the next /ws event.
 app.get('/api/youtube/queue', (req, res) => {
-  res.json({ jobs: [...ytJobs.values()].map(({ videoId, playlist, title, status, error, percent, phase }) => ({ videoId, playlist, title, status, error, percent, phase })) });
+  res.json({ jobs: [...ytJobs.values()].map(({ videoId, playlist, title, status, error, percent, phase, bytes }) => ({ videoId, playlist, title, status, error, percent, phase, bytes })) });
 });
 
 async function unusedPlaylistUploadName(dir, name) {
