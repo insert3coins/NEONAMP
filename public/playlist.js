@@ -270,8 +270,17 @@ function renderTracks() {
       (!!liveState?.trackKey && liveState.trackKey === trackKey(track));
     item.classList.toggle('current', isCurrent);
     const ytJob = track.storage === 'youtube' ? ytJobs.get(track.videoId) : null;
+    // A request that hasn't been approved yet was never queued for
+    // download (see addYoutubeRequest server-side) — no ytJob entry, but
+    // it's just as unplayable as one that is, so it gets the same
+    // dimmed/pending treatment rather than looking like a ready track.
+    // `downloaded` (server-annotated, or set locally once a 'ready' event
+    // arrives) overrides this once it's actually done, since requestedBy
+    // stays on the track forever and can't be used alone to tell "never
+    // downloaded" apart from "downloaded ages ago".
+    const awaitingApproval = track.storage === 'youtube' && !!track.requestedBy && !ytJob && track.downloaded !== true;
     const kindClass = track.storage === 'radio' ? ' radio'
-      : track.storage === 'youtube' ? ` youtube${ytJob?.status === 'error' ? ' error' : ytJob ? ' pending' : ''}` : '';
+      : track.storage === 'youtube' ? ` youtube${ytJob?.status === 'error' ? ' error' : (ytJob || awaitingApproval) ? ' pending' : ''}` : '';
     item.innerHTML = `
       <span class="trackname"><strong></strong><small></small></span>
       <span class="album"></span>
@@ -1384,6 +1393,17 @@ function connectWebSocket() {
       // told them; they'll see the new tracks next time they open it.
       if (message.playlist === currentName && !dirty) loadPlaylist(currentName, true);
       else refreshPlaylists(currentName);
+    } else if (message.type === 'cmd' && message.cmd === 'playlist-append') {
+      // Unlike youtube-resync above, this is a plain splice-in of one new
+      // track — nothing local gets overwritten, so it's safe even with
+      // unsaved edits pending (they'll just save together later).
+      if (message.name === currentName && message.track
+          && !tracks.some((t) => t.storage === 'youtube' && t.videoId === message.track.videoId)) {
+        tracks.push(message.track);
+        renderTracks();
+        toast(`NEW REQUEST: ${trackLabel(message.track).toUpperCase()}`);
+      }
+      refreshPlaylists(currentName);
     } else if (message.type === 'youtube') {
       handleYoutubeEvent(message);
     }
@@ -1435,7 +1455,7 @@ function importSiteLabel(track) {
 
 function youtubeKindText(job, track) {
   const site = importSiteLabel(track);
-  if (!job) return site;
+  if (!job) return (track.requestedBy && track.downloaded !== true) ? 'AWAITING APPROVAL' : site;
   if (job.status === 'downloading') {
     const label = job.phase === 'converting' ? 'CONVERTING' : 'DOWNLOADING';
     return `${label}${Number.isFinite(job.percent) ? ` ${job.percent}%` : ''}`;
@@ -1470,13 +1490,16 @@ function handleYoutubeEvent(message) {
   renderYtProgress();
   if (playlist !== currentName) return;
   if (event === 'progress') { updateYoutubeRowBadge(videoId); return; }
-  if (event === 'ready' && meta) {
+  if (event === 'ready') {
     // A batch/set add only had sparse placeholder metadata for some sites —
     // the server corrects the persisted entry post-download and sends the
     // real values along with 'ready', so the open manager doesn't keep
-    // showing "Untitled" until the next full reload.
+    // showing "Untitled" until the next full reload. `downloaded` is what
+    // renderTracks() uses to stop showing a just-finished request as
+    // "awaiting approval" — the server annotates it fresh on the next
+    // GET, but this tab isn't refetching, so it needs setting here too.
     const idx = tracks.findIndex((t) => t.storage === 'youtube' && t.videoId === videoId);
-    if (idx >= 0) tracks[idx] = { ...tracks[idx], title: meta.title, artist: meta.artist, duration: meta.duration };
+    if (idx >= 0) tracks[idx] = { ...tracks[idx], downloaded: true, ...(meta ? { title: meta.title, artist: meta.artist, duration: meta.duration } : {}) };
   }
   renderTracks();
   const track = tracks.find((t) => t.storage === 'youtube' && t.videoId === videoId);

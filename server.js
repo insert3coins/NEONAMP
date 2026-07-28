@@ -1796,12 +1796,30 @@ app.get('/api/smart/played', async (req, res) => {
   res.json({ results });
 });
 
+// A request track keeps `requestedBy` forever, including long after it's
+// downloaded and playing fine — so the client can't tell "never approved,
+// still queued" apart from "approved ages ago" from that field alone.
+// Only these need the check (never more than a handful per playlist), so
+// a per-request fs.access pass here is cheap; not worth touching
+// exposedPlaylist() itself (used by several other endpoints that don't
+// need this).
+async function annotateRequestDownloadStatus(tracks) {
+  await Promise.all(tracks.map(async (t) => {
+    if (t.storage !== 'youtube' || !t.requestedBy) return;
+    try { await fs.access(path.join(YOUTUBE_DIR, `${t.videoId}.m4a`)); t.downloaded = true; }
+    catch { t.downloaded = false; }
+  }));
+  return tracks;
+}
+
 app.get('/api/playlists/:name', async (req, res) => {
   const name = safeName(req.params.name);
   if (!name) return res.status(400).json({ error: 'Invalid playlist name' });
   try {
     const raw = await fs.readFile(path.join(PLAYLIST_DIR, `${name}.json`), 'utf8');
-    res.json(exposedPlaylist(JSON.parse(raw), name));
+    const playlist = exposedPlaylist(JSON.parse(raw), name);
+    await annotateRequestDownloadStatus(playlist.tracks);
+    res.json(playlist);
   } catch {
     res.status(404).json({ error: 'Playlist not found' });
   }
@@ -1966,7 +1984,15 @@ async function addYoutubeRequest(playlistName, url, requestedBy) {
 
   const next = { ...data, version: 2, name: playlistName, saved: new Date().toISOString(), tracks: [...existing, ...stubs] };
   await writeJsonFile(playlistFile, next);
-  queueYoutubeStubs(stubs, playlistName);
+  // Deliberately NOT queued for download here — that only happens on
+  // approve, below. A request sitting in the review queue shouldn't cost
+  // bandwidth/CPU/disk for something the streamer might reject; someone
+  // could spam a pile of unwanted requests otherwise and every one of them
+  // would download regardless of what happens to it.
+  // Same live-append the approve endpoint uses below — whoever has this
+  // playlist open (deck, jukebox, or the manager itself) sees the new
+  // request land without reloading.
+  broadcastCmd('playlist-append', { name: playlistName, track: stubs[0] });
   return { ok: true, title: stubs[0].title, artist: stubs[0].artist };
 }
 
@@ -2000,6 +2026,12 @@ app.post('/api/playlists/:name/requests/:videoId/approve', async (req, res) => {
 
   await writeJsonFile(sourceFile, { ...sourceData, version: 2, name, saved: new Date().toISOString(), tracks: sourceTracks });
   await writeJsonFile(targetFile, { ...targetData, version: 2, name: target, saved: new Date().toISOString(), tracks: targetTracks });
+
+  // The actual download starts here, not at request time — see the
+  // comment in addYoutubeRequest. Skipped if it's already sitting in the
+  // target (alreadyThere): that copy has presumably already downloaded or
+  // is downloading, re-queuing it would just race the existing job.
+  if (!alreadyThere) queueYoutubeStubs([track], target);
 
   // Whoever has `target` as their active queue right now (deck or jukebox)
   // picks this up live — see app.js's 'playlist-append' handler. Broadcast
