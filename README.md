@@ -124,8 +124,9 @@ the Visual Studio C++ build tools. The icon is generated art — rerun
 Everything about the player auto-saves (debounced) to `settings.json`
 in the project root: the queue, **current track + position**, volume,
 balance, EQ curve + preset name, EQ on/off, OBS routing, DSP modules,
-normalization, visualizer mode, theme, shuffle/repeat, and panel
-collapse state. Track position is recorded
+normalization, crossfade duration, visualizer mode, theme, shuffle/repeat,
+and panel collapse state (the sleep timer is deliberately excluded — see
+Sleep timer below). Track position is recorded
 **server-side** from the live `/ws` state stream every ~2.5s while a
 player is running — no browser timing involved — so a hard stop of
 any kind (Ctrl+C on the server, killed tab, crash, power cut) loses
@@ -174,6 +175,46 @@ true final master stage after normalization, EQ, DSP, leveling, balance,
 and peak limiting. Changing volume therefore cannot alter compressor
 thresholds or cause the leveler to compensate for the slider movement.
 The plain media-element volume is used only as a no-Web-Audio fallback.
+
+## Crossfade / gapless playback
+
+**XFD** on the deck cycles off → 2s → 4s → 6s → 8s → 10s → off. With a
+duration set, the deck runs two real `<audio>` elements sharing the same
+EQ/DSP chain: shortly before the current track ends (or the moment you
+hit **NEXT**, mid-track), the next track starts on the idle element and
+the two are cross-faded via Web Audio gain automation — no dead air, no
+hard cut. Each side gets its own loudness-normalization gain, so the
+incoming track fades in at its own corrected level rather than the
+outgoing track's. Manually skipping, jumping to a specific track, or
+hitting stop cancels an in-flight fade cleanly. Radio streams never
+crossfade (nothing to pre-buffer on a live stream) — a track next to one
+just switches instantly, same as XFD off. Persists in `settings.json`
+and is remote-controllable from `/playlist`.
+
+## Waveform seek bar
+
+The strip above the seek slider draws the track's actual amplitude
+envelope — not a decoration, a real ffmpeg analysis (mono, downsampled,
+~400 peak buckets), cached per file in `waveform-cache.json` exactly
+like the loudness cache, and pushed live over `/ws` the first time a
+track is played. Click or drag on it to seek, same as the slider
+underneath (which stays the accessible/keyboard-drivable control — the
+waveform is a taller, easier click target plus the visual). Internet
+radio has no fixed waveform and is skipped; while a fresh track's
+analysis is still pending, the strip just stays blank and the plain
+slider fill works as it always has.
+
+## Sleep timer
+
+**SLP** opens a picker: 15/30/45/60/90/120 minutes, **END OF TRACK**,
+**END OF QUEUE**, or **OFF**. A running timer fades playback out over 4
+seconds and pauses (not stops — you resume where you left off, not from
+track 1). END OF QUEUE stops at the natural end of the current pass
+through the list rather than wrapping on repeat-all; in shuffle mode,
+where "end of queue" has no fixed meaning, it behaves like END OF TRACK
+instead. The timer is in-memory only — reloading the page cancels it,
+same as every other setting that isn't written to `settings.json` on
+every tick.
 
 ## M3U export
 
@@ -305,8 +346,15 @@ Click the deck's visualizer to cycle, or press **VIS** to pick directly:
 **BARS** (44-band spectrum), **SCOPE** (neon oscilloscope), **VU**
 (segmented meter), **RADIAL** (circular spectrum), **WATERFALL**
 (scrolling frequency history), **DOTS** (matrix spectrum), **PARTICLES**
-(bass-reactive burst), and **OFF** (grid idle). Your pick is saved. The
-OBS overlay supports the same modes through its `?vis=` parameter.
+(bass-reactive burst), **LISSAJOUS X-Y** (true stereo X-Y scope — mono
+material collapses toward a diagonal, which is correct, not a bug),
+**WARP TUNNEL** (receding polygon rings), **SPIRAL SPECTRUM** (spectrum
+bars arranged along an expanding, rotating spiral), **SONAR PULSE**
+(rings that ping outward on bass hits), and **OFF** (grid idle). Your
+pick is saved. The OBS overlay supports the same modes through its
+`?vis=` parameter, except LISSAJOUS — the overlay only ever receives a
+mono FFT/waveform stream over `/ws`, with no true stereo separation to
+plot, so it falls back to BARS.
 
 ## OBS broadcast overlay
 
@@ -347,7 +395,7 @@ URL params (combine freely):
 | `?shuffle=1` | Shuffle (jukebox)                             |
 | `?vol=40`    | Volume 0–100 (jukebox)                        |
 | `?mirror=1`  | Mirror the main deck instead of playing       |
-| `?vis=bars` / `scope` / `vu` / `radial` / `waterfall` / `dots` / `particles` / `off` | Visualizer style |
+| `?vis=bars` / `scope` / `vu` / `radial` / `waterfall` / `dots` / `particles` / `tunnel` / `spiral` / `pulse` / `off` | Visualizer style (`lissajous` accepted but renders as bars — see Visualizers) |
 | `?demo=1`    | Fake data — for positioning the source in OBS |
 | `?keep=1`    | Never auto-hide (mirror mode)                 |
 | `?novis=1`   | Hide the visualizer                           |
@@ -485,6 +533,7 @@ collapse their panels just like the original.
 - `GET  /playlist` — playlist management UI
 - `GET  /api/art?...` — artwork for playlist or registered filepath sources
 - `GET  /api/loudness?...` — normalization data for playlist or filepath sources
+- `GET  /api/waveform?...` — cached amplitude-envelope peaks for the seek bar
 - `GET/PUT/DELETE /api/metadata?...` — read, save, or reset a metadata sidecar
 - `GET/POST /api/radio` — list or add radio bookmarks
 - `PUT/DELETE /api/radio/:id` — edit or remove a station

@@ -33,10 +33,15 @@ let eqPreset = 'FLAT';       // active preset label ('CUSTOM' when hand-tuned)
 let obsEq = false;           // overlay routes audio through this EQ (persisted)
 let dspModules = [];
 let visMode = 'bars';
-const VIS_MODES = ['bars', 'scope', 'vu', 'radial', 'waterfall', 'dots', 'particles', 'off'];
+const VIS_MODES = [
+  'bars', 'scope', 'vu', 'radial', 'waterfall', 'dots', 'particles',
+  'lissajous', 'tunnel', 'spiral', 'pulse', 'off'
+];
 const VIS_LABELS = {
   bars: 'SPECTRUM BARS', scope: 'OSCILLOSCOPE', vu: 'VU METER', radial: 'RADIAL CORE',
-  waterfall: 'WATERFALL', dots: 'DOT MATRIX', particles: 'PARTICLE BURST', off: 'OFF / GRID'
+  waterfall: 'WATERFALL', dots: 'DOT MATRIX', particles: 'PARTICLE BURST',
+  lissajous: 'LISSAJOUS X-Y', tunnel: 'WARP TUNNEL', spiral: 'SPIRAL SPECTRUM', pulse: 'SONAR PULSE',
+  off: 'OFF / GRID'
 };
 
 // The classic Winamp/XMMS preset bank (dB per band, clamped ±12)
@@ -245,9 +250,10 @@ const els = {
   timeMain: $('#timeMain'), playState: $('#playState'),
   vis: $('#vis'), marquee: $('.marquee'), marqueeText: $('#marqueeText'),
   kbps: $('#kbps'), khz: $('#khz'), chan: $('#chan'),
-  seek: $('#seek'), vol: $('#vol'), volVal: $('#volVal'),
+  seek: $('#seek'), seekWave: $('#seekWave'), vol: $('#vol'), volVal: $('#volVal'),
   bal: $('#bal'), balVal: $('#balVal'),
   btnShuffle: $('#btnShuffle'), btnRepeat: $('#btnRepeat'), btnNorm: $('#btnNorm'), btnVis: $('#btnVis'),
+  btnXfade: $('#btnXfade'), btnSleep: $('#btnSleep'),
   btnPrev: $('#btnPrev'), btnPlay: $('#btnPlay'), btnPause: $('#btnPause'),
   btnStop: $('#btnStop'), btnNext: $('#btnNext'), btnEject: $('#btnEject'),
   btnEqToggle: $('#btnEqToggle'), btnPlToggle: $('#btnPlToggle'), btnTheme: $('#btnTheme'),
@@ -462,14 +468,45 @@ function sanitizeDspModules(input) {
 }
 
 // ------------------------------------------------------------
-// Audio element + Web Audio graph (built lazily on first play,
+// Audio elements + Web Audio graph (built lazily on first play,
 // because AudioContext needs a user gesture)
+//
+// Two real <audio> elements (audioA/audioB) so a crossfade has something to
+// fade INTO while the outgoing track is still playing — one HTMLMediaElement
+// can only ever hold one track. `audio` is a Proxy over whichever is
+// "active" right now, so every existing call site (audio.currentTime,
+// audio.play(), audio.src = ..., etc.) keeps working unchanged and never
+// needs to know which real element is behind it. addEventListener/
+// removeEventListener are special-cased to register on BOTH elements, since
+// those listeners are attached once at module load and must keep working
+// no matter which element becomes active later; each listener guards itself
+// with `e.currentTarget !== activeEl` so only the active element's events
+// drive shared UI/state (see the timeupdate/playing/pause/ended/error
+// listeners below). One-off `{once:true}` listeners tied to a specific
+// src assignment (restoreSession, renameLoadedPlaylist) attach to
+// `activeEl` directly instead, so they don't end up double-registered and
+// firing against the wrong track later.
 // ------------------------------------------------------------
-const audio = new Audio();
-audio.preload = 'auto';
+const audioA = new Audio();
+const audioB = new Audio();
+audioA.preload = 'auto';
+audioB.preload = 'auto';
+let activeEl = audioA;
+const audio = new Proxy({}, {
+  get(_, prop) {
+    if (prop === 'addEventListener' || prop === 'removeEventListener') {
+      return (...args) => { audioA[prop](...args); audioB[prop](...args); };
+    }
+    const v = activeEl[prop];
+    return typeof v === 'function' ? v.bind(activeEl) : v;
+  },
+  set(_, prop, value) { activeEl[prop] = value; return true; }
+});
 
 let actx = null, preamp = null, panner = null, analyser = null;
 let levelMeter = null, outputGain = null, safetyLimiter = null, masterGain = null;
+let gainA = null, gainB = null;
+let stereoSplit = null, analyserL = null, analyserR = null;
 const filters = [];
 let dspAudioNodes = [];
 let levelBuffer = null, levelPower = null, levelTrimDb = 0, levelSampleAt = 0;
@@ -616,7 +653,13 @@ function ensureGraph() {
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return; // exotic browser: plain <audio> still plays, no vis/EQ
   actx = new AC();
-  const src = actx.createMediaElementSource(audio);
+  const srcA = actx.createMediaElementSource(audioA);
+  const srcB = actx.createMediaElementSource(audioB);
+  // Per-element gain carries that element's own track normalization AND is
+  // what the crossfade ramps — preamp downstream is just their merge point,
+  // always unity, shared by both decks equally (EQ/DSP treat both the same).
+  gainA = actx.createGain(); gainA.gain.value = 1;
+  gainB = actx.createGain(); gainB.gain.value = 0; // B starts idle/silent
   preamp = actx.createGain();
   preamp.gain.value = 1;
   applyNormGain();
@@ -646,10 +689,23 @@ function ensureGraph() {
   analyser.fftSize = 1024;
   analyser.smoothingTimeConstant = 0.82;
 
-  src.connect(preamp);
+  srcA.connect(gainA); gainA.connect(preamp);
+  srcB.connect(gainB); gainB.connect(preamp);
   if (panner) panner.pan.value = Number(els.bal.value) / 100;
   masterGain.connect(analyser);
   analyser.connect(actx.destination);
+
+  // Stereo tap for the LISSAJOUS visualizer — parallel branch off the same
+  // signal, never connected to destination itself so it can't double the
+  // audio output. True L/R separation needs its own splitter; the main
+  // `analyser` above is downmixed and can't provide that.
+  stereoSplit = actx.createChannelSplitter(2);
+  analyserL = actx.createAnalyser(); analyserL.fftSize = 1024; analyserL.smoothingTimeConstant = 0.82;
+  analyserR = actx.createAnalyser(); analyserR.fftSize = 1024; analyserR.smoothingTimeConstant = 0.82;
+  masterGain.connect(stereoSplit);
+  stereoSplit.connect(analyserL, 0);
+  stereoSplit.connect(analyserR, 1);
+
   rebuildAudioChain();
   applyVolume();
   return actx;
@@ -681,6 +737,7 @@ function sizeVis() {
 
 function drawVis() {
   requestAnimationFrame(drawVis);
+  drawSeekWaveform();
   const g = els.vis.getContext('2d');
   g.clearRect(0, 0, visW, visH);
   if (visMode === 'off') { drawOffGrid(g); return; }
@@ -690,6 +747,10 @@ function drawVis() {
   if (visMode === 'waterfall') { drawWaterfall(g); return; }
   if (visMode === 'dots') { drawDots(g); return; }
   if (visMode === 'particles') { drawParticles(g); return; }
+  if (visMode === 'lissajous') { drawLissajous(g); return; }
+  if (visMode === 'tunnel') { drawTunnel(g); return; }
+  if (visMode === 'spiral') { drawSpiral(g); return; }
+  if (visMode === 'pulse') { drawPulse(g); return; }
   drawBars(g);
 }
 
@@ -900,6 +961,134 @@ function drawParticles(g) {
   g.shadowBlur = 0; g.globalAlpha = 1;
 }
 
+// True stereo X-Y scope — needs L/R kept separate, which the main mono
+// `analyser` can't give us; see the stereoSplit/analyserL/analyserR tap
+// built alongside it in ensureGraph(). Mono material collapses toward the
+// diagonal (L≈R), which is the physically correct result, not a bug.
+let lissajousBufL = null, lissajousBufR = null;
+function drawLissajous(g) {
+  if (!analyserL || !analyserR) { drawOffGrid(g); return; }
+  if (!lissajousBufL || lissajousBufL.length !== analyserL.fftSize) lissajousBufL = new Uint8Array(analyserL.fftSize);
+  if (!lissajousBufR || lissajousBufR.length !== analyserR.fftSize) lissajousBufR = new Uint8Array(analyserR.fftSize);
+  analyserL.getByteTimeDomainData(lissajousBufL);
+  analyserR.getByteTimeDomainData(lissajousBufR);
+  const cx = visW / 2, cy = visH / 2;
+  const scale = Math.min(visW, visH) / 2 - 4;
+  g.strokeStyle = VIS_COLORS.dim;
+  g.globalAlpha = .22;
+  g.lineWidth = 1;
+  g.beginPath(); g.moveTo(cx - scale, cy); g.lineTo(cx + scale, cy); g.stroke();
+  g.beginPath(); g.moveTo(cx, cy - scale); g.lineTo(cx, cy + scale); g.stroke();
+
+  g.strokeStyle = VIS_COLORS.c1;
+  g.shadowColor = VIS_COLORS.c1;
+  g.shadowBlur = 5;
+  g.lineWidth = 1.4;
+  g.globalAlpha = 0.85;
+  g.beginPath();
+  const n = lissajousBufL.length;
+  const step = Math.max(1, Math.floor(n / 600)); // cap point count for perf
+  for (let i = 0; i < n; i += step) {
+    const x = cx + ((lissajousBufL[i] - 128) / 128) * scale;
+    const y = cy + ((lissajousBufR[i] - 128) / 128) * scale;
+    i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+  }
+  g.stroke();
+  g.shadowBlur = 0;
+  g.globalAlpha = 1;
+}
+
+let tunnelPhase = 0;
+function drawTunnel(g) {
+  const levels = spectrumLevels(16);
+  const bass = levels ? (levels[0] + levels[1] + levels[2]) / 3 : 0;
+  tunnelPhase += 0.01 + bass * 0.03;
+  const cx = visW / 2, cy = visH / 2;
+  const maxR = Math.hypot(cx, cy);
+  const rings = 14;
+  g.save();
+  g.translate(cx, cy);
+  for (let i = rings; i >= 1; i--) {
+    const t = (i / rings + tunnelPhase * 0.15) % 1;
+    const r = t * maxR;
+    const v = levels ? levels[i % 16] : 0.1;
+    const sides = 28;
+    g.beginPath();
+    for (let s = 0; s <= sides; s++) {
+      const a = (s / sides) * Math.PI * 2 + tunnelPhase * (i % 2 ? 1 : -1);
+      const wob = 1 + v * 0.25 * Math.sin(a * 3 + tunnelPhase * 4);
+      const x = Math.cos(a) * r * wob;
+      const y = Math.sin(a) * r * wob;
+      s === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+    }
+    g.closePath();
+    g.strokeStyle = i % 3 === 0 ? VIS_COLORS.c3 : i % 2 === 0 ? VIS_COLORS.peak : VIS_COLORS.c1;
+    g.globalAlpha = Math.max(.05, (1 - t) * (0.35 + v * 0.65));
+    g.lineWidth = 1 + v * 2;
+    g.stroke();
+  }
+  g.restore();
+  g.globalAlpha = 1;
+}
+
+let spiralPhase = 0;
+function drawSpiral(g) {
+  const count = 64;
+  const levels = spectrumLevels(count);
+  spiralPhase += 0.006;
+  const cx = visW / 2, cy = visH / 2;
+  const maxR = Math.min(visW, visH) / 2 - 4;
+  const turns = 2.4;
+  g.save();
+  g.translate(cx, cy);
+  for (let i = 0; i < count; i++) {
+    const v = levels ? levels[i] : 0.05;
+    const a = (i / count) * Math.PI * 2 * turns + spiralPhase;
+    const r = (i / count) * maxR;
+    const len = 3 + v * 14;
+    const x1 = Math.cos(a) * r, y1 = Math.sin(a) * r;
+    const x2 = Math.cos(a) * (r + len), y2 = Math.sin(a) * (r + len);
+    g.strokeStyle = v > .7 ? VIS_COLORS.peak : v > .4 ? VIS_COLORS.c3 : VIS_COLORS.c1;
+    g.globalAlpha = levels ? .35 + v * .65 : .12;
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+  }
+  g.restore();
+  g.globalAlpha = 1;
+}
+
+let pulseRings = [];
+let pulseLastBass = 0;
+function drawPulse(g) {
+  const levels = spectrumLevels(8);
+  const bass = levels ? (levels[0] + levels[1] + levels[2]) / 3 : 0;
+  const cx = visW / 2, cy = visH / 2;
+  const maxR = Math.hypot(cx, cy);
+  if (bass > 0.35 && bass > pulseLastBass + 0.08 && pulseRings.length < 8) {
+    pulseRings.push({ r: 4, life: 1, strength: bass });
+  }
+  pulseLastBass = bass * 0.7 + pulseLastBass * 0.3;
+  g.save();
+  g.translate(cx, cy);
+  pulseRings = pulseRings.filter((ring) => {
+    ring.r += 2.4 + ring.strength * 2.5;
+    ring.life -= 0.018;
+    if (ring.life <= 0 || ring.r > maxR) return false;
+    g.strokeStyle = ring.strength > .7 ? VIS_COLORS.peak : VIS_COLORS.c1;
+    g.globalAlpha = Math.max(0, ring.life) * .8;
+    g.lineWidth = 1.5 + ring.strength * 2;
+    g.beginPath(); g.arc(0, 0, ring.r, 0, Math.PI * 2); g.stroke();
+    return true;
+  });
+  g.fillStyle = VIS_COLORS.c3;
+  g.globalAlpha = .3 + bass * .6;
+  g.shadowColor = VIS_COLORS.c3; g.shadowBlur = 8;
+  g.beginPath(); g.arc(0, 0, 4 + bass * 10, 0, Math.PI * 2); g.fill();
+  g.shadowBlur = 0;
+  g.restore();
+  g.globalAlpha = 1;
+}
+
 function drawOffGrid(g) {
   g.globalAlpha = 0.12;
   g.strokeStyle = VIS_COLORS.c1;
@@ -940,6 +1129,98 @@ function openVisualizerPicker() {
     closeModal();
   });
 }
+
+// ------------------------------------------------------------
+// Waveform seek bar — amplitude bars drawn above the native seek
+// slider. The slider stays the actual keyboard/touch-accessible drag
+// target; this canvas is a scrub preview and a second, taller click
+// target over the same range. Peaks come from the server (real ffmpeg
+// analysis, cached — see /api/waveform); while unknown it just stays
+// blank and the plain slider fill underneath still works exactly as
+// before, so this is purely additive.
+// ------------------------------------------------------------
+let waveformPeaks = null;
+let waveformState = 'idle'; // 'idle' | 'pending' | 'ready' | 'unavailable'
+let seekWaveW = 0, seekWaveH = 0;
+const waveformCache = new Map(); // trackKey -> peaks array
+
+function sizeSeekWave() {
+  if (!els.seekWave) return;
+  const dpr = window.devicePixelRatio || 1;
+  seekWaveW = els.seekWave.clientWidth;
+  seekWaveH = els.seekWave.clientHeight;
+  els.seekWave.width = Math.max(1, Math.round(seekWaveW * dpr));
+  els.seekWave.height = Math.max(1, Math.round(seekWaveH * dpr));
+  const g = els.seekWave.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawSeekWaveform();
+}
+
+function drawSeekWaveform() {
+  if (!els.seekWave) return;
+  const g = els.seekWave.getContext('2d');
+  g.clearRect(0, 0, seekWaveW, seekWaveH);
+  if (!waveformPeaks || waveformState !== 'ready') return;
+  const d = audio.duration;
+  const frac = (!seeking && isFinite(d) && d > 0) ? (audio.currentTime / d) : (Number(els.seek.value) / 1000);
+  const n = waveformPeaks.length;
+  const gap = 1;
+  const bw = Math.max(1, (seekWaveW - gap * (n - 1)) / n);
+  const mid = seekWaveH / 2;
+  for (let i = 0; i < n; i++) {
+    const v = Math.max(0.03, waveformPeaks[i]);
+    const h = Math.max(1, v * (seekWaveH - 4));
+    const x = i * (bw + gap);
+    const played = i / n <= frac;
+    g.fillStyle = played ? VIS_COLORS.c1 : VIS_COLORS.dim;
+    g.globalAlpha = played ? 0.95 : 0.4;
+    g.fillRect(x, mid - h / 2, bw, h);
+  }
+  g.globalAlpha = 1;
+}
+
+function loadWaveform(t) {
+  waveformPeaks = null;
+  waveformState = 'idle';
+  if (!t || t.storage === 'radio') { waveformState = 'unavailable'; return; }
+  const key = trackKey(t);
+  const cached = waveformCache.get(key);
+  if (cached) { waveformPeaks = cached; waveformState = 'ready'; return; }
+  waveformState = 'pending';
+  api(mediaApiUrl('waveform', t)).then((r) => {
+    if (cur < 0 || trackKey(pl[cur]) !== key) return; // track changed before this resolved
+    if (r.status === 'ready' && Array.isArray(r.peaks)) {
+      waveformCache.set(key, r.peaks);
+      waveformPeaks = r.peaks;
+      waveformState = 'ready';
+    } else if (r.status === 'unavailable') {
+      waveformState = 'unavailable';
+    }
+    // 'pending' resolves via the /ws {type:'waveform'} push
+  }).catch(() => { waveformState = 'unavailable'; });
+}
+
+function seekWaveToClientX(clientX) {
+  if (!els.seekWave || !isFinite(audio.duration) || audio.duration <= 0) return;
+  const rect = els.seekWave.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  audio.currentTime = frac * audio.duration;
+  els.seek.value = frac * 1000;
+  setRangeFill(els.seek, frac * 100);
+}
+let seekWaveDragging = false;
+els.seekWave?.addEventListener('pointerdown', (e) => {
+  seekWaveDragging = true;
+  seeking = true;
+  seekWaveToClientX(e.clientX);
+});
+window.addEventListener('pointermove', (e) => { if (seekWaveDragging) seekWaveToClientX(e.clientX); });
+window.addEventListener('pointerup', () => {
+  if (!seekWaveDragging) return;
+  seekWaveDragging = false;
+  seeking = false;
+  scheduleSession();
+});
 
 // ------------------------------------------------------------
 // Marquee
@@ -1009,8 +1290,22 @@ function scrollCurrentIntoView(block = 'nearest') {
   });
 }
 
+// Shared UI/state tail for "a new track is now the one playing" — used by
+// both a plain playIndex() and a crossfade finishing (which never calls
+// playIndex, since the incoming element is already mid-playback by then).
+function onTrackChanged(t) {
+  fetchNormGain(t);
+  loadWaveform(t);
+  setMarquee(`${trackLabel(t)}  ::  NEONAMP`);
+  updateMeta(t);
+  document.title = `${trackLabel(t)} — NEONAMP`;
+  renderPlaylist();
+  scrollCurrentIntoView('nearest');
+}
+
 function playIndex(i) {
   if (i < 0 || i >= pl.length) return;
+  cancelCrossfade();
   ensureGraph();
   cur = i;
   sel = i;
@@ -1020,18 +1315,14 @@ function playIndex(i) {
   currentRadioTitle = '';
   audio.src = trackUrl(t);
   audio.play().catch(() => {});
-  fetchNormGain(t);
-  setMarquee(`${trackLabel(t)}  ::  NEONAMP`);
-  updateMeta(t);
-  document.title = `${trackLabel(t)} — NEONAMP`;
-  renderPlaylist();
-  scrollCurrentIntoView('nearest');
+  onTrackChanged(t);
 }
 
 function doPlay() {
   if (cur >= 0 && audio.src) {
     ensureGraph();
     audio.play().catch(() => {});
+    if (crossfading) { const idle = activeEl === audioA ? audioB : audioA; idle.play().catch(() => {}); }
   } else if (pl.length) {
     playIndex(sel >= 0 ? sel : 0);
   } else {
@@ -1041,11 +1332,18 @@ function doPlay() {
 
 function doPause() {
   if (!audio.src) return;
-  if (audio.paused) { ensureGraph(); audio.play().catch(() => {}); }
-  else audio.pause();
+  if (audio.paused) {
+    ensureGraph();
+    audio.play().catch(() => {});
+    if (crossfading) { const idle = activeEl === audioA ? audioB : audioA; idle.play().catch(() => {}); }
+  } else {
+    audio.pause();
+    if (crossfading) { const idle = activeEl === audioA ? audioB : audioA; idle.pause(); }
+  }
 }
 
 function doStop() {
+  cancelCrossfade();
   clearTimeout(radioRetryTimer);
   radioRetry = 0;
   audio.pause();
@@ -1063,25 +1361,45 @@ function pickShuffle() {
   return j;
 }
 
+// Pure "what would playing next land on" — no side effects — so both a
+// manual/auto doNext() and the crossfade auto-trigger (which needs to know
+// the target seconds before the track actually ends) agree on the answer.
+// -1 means "nothing to advance to" (end of queue, repeat off).
+function resolveNextIndex() {
+  if (!pl.length) return -1;
+  if (shuffle) return pickShuffle();
+  const base = cur >= 0 ? cur : (sel >= 0 ? sel - 1 : -1);
+  const n = base + 1;
+  if (n >= pl.length) return repeat === 'all' ? 0 : -1;
+  return n;
+}
+
 function doNext(auto = false) {
   if (!pl.length) return;
-  if (shuffle) {
-    if (cur >= 0) playHistory.push(cur);
+  if (auto && sleepWouldStopHere()) { fireSleepTimer(); return; }
+  // A manual skip mid-fade should feel instant, not restart a second fade —
+  // remember that a fade was in flight so the eligibility check below can
+  // skip it, even though xfadeSeconds is still > 0.
+  const wasCrossfading = crossfading;
+  if (!auto) cancelCrossfade();
+  if (crossfading) return; // an auto-triggered fade is already mid-flight
+  const n = resolveNextIndex();
+  if (n < 0) { if (auto) doStop(); return; }
+  if (shuffle && cur >= 0) {
+    playHistory.push(cur);
     if (playHistory.length > 100) playHistory.shift();
-    playIndex(pickShuffle());
-    return;
   }
-  const base = cur >= 0 ? cur : (sel >= 0 ? sel - 1 : -1);
-  let n = base + 1;
-  if (n >= pl.length) {
-    if (repeat === 'all') n = 0;
-    else { if (auto) doStop(); return; }
+  if (!wasCrossfading && xfadeSeconds > 0 && cur >= 0 && !audio.paused &&
+      pl[cur]?.storage !== 'radio' && pl[n]?.storage !== 'radio') {
+    beginCrossfade(n);
+  } else {
+    playIndex(n);
   }
-  playIndex(n);
 }
 
 function doPrev() {
   if (!pl.length) return;
+  cancelCrossfade();
   if (audio.src && audio.currentTime > 3) { audio.currentTime = 0; return; }
   if (shuffle && playHistory.length) { playIndex(playHistory.pop()); return; }
   const base = cur >= 0 ? cur : (sel >= 0 ? sel : 0);
@@ -1089,6 +1407,211 @@ function doPrev() {
   if (p < 0) p = repeat === 'all' ? pl.length - 1 : 0;
   playIndex(p);
 }
+
+// ------------------------------------------------------------
+// Crossfade / gapless — two real <audio> elements share one EQ/DSP chain
+// (see ensureGraph); this only decides WHEN to start the incoming one and
+// automates the two per-element gain nodes between them. xfadeSeconds === 0
+// means the feature is off and doNext()/the 'ended' handler behave exactly
+// as they always have — nothing here ever runs.
+// ------------------------------------------------------------
+let xfadeSeconds = 0;
+const XFADE_STEPS = [0, 2, 4, 6, 8, 10];
+let crossfading = false;
+let xfadeTimer = null;
+const normGainCache = new Map(); // trackKey -> dB, best-effort prefetch for the incoming deck
+
+async function peekNormGain(t) {
+  if (!t || t.storage === 'radio') return 0;
+  const key = trackKey(t);
+  if (normGainCache.has(key)) return normGainCache.get(key);
+  try {
+    const r = await api(mediaApiUrl('loudness', t));
+    if (r.status === 'ready' && typeof r.gain === 'number') {
+      normGainCache.set(key, r.gain);
+      return r.gain;
+    }
+  } catch { /* unity until analyzed — same tradeoff as a fresh single-deck play */ }
+  return 0;
+}
+
+function cancelCrossfade() {
+  if (!crossfading) return;
+  clearTimeout(xfadeTimer);
+  crossfading = false;
+  const idle = activeEl === audioA ? audioB : audioA;
+  const idleGain = activeEl === audioA ? gainB : gainA;
+  try { idle.pause(); } catch { /* ignore */ }
+  if (actx) {
+    idleGain.gain.cancelScheduledValues(actx.currentTime);
+    idleGain.gain.setValueAtTime(0, actx.currentTime);
+    const active = activeTrackGain();
+    active.gain.cancelScheduledValues(actx.currentTime);
+    active.gain.setValueAtTime(normalize ? Math.pow(10, normGain / 20) : 1, actx.currentTime);
+  }
+}
+
+async function beginCrossfade(nextIdx) {
+  if (crossfading || !actx || nextIdx < 0 || nextIdx >= pl.length) return;
+  const nextTrack = pl[nextIdx];
+  if (!nextTrack || nextTrack.storage === 'radio' || pl[cur]?.storage === 'radio') return;
+  crossfading = true;
+  const outgoing = activeEl;
+  const incoming = activeEl === audioA ? audioB : audioA;
+  const outGain = activeTrackGain();
+  const inGain = activeEl === audioA ? gainB : gainA;
+
+  incoming.src = trackUrl(nextTrack);
+  inGain.gain.cancelScheduledValues(actx.currentTime);
+  inGain.gain.setValueAtTime(0, actx.currentTime);
+  incoming.play().catch(() => {});
+
+  const targetIn = normalize ? Math.pow(10, (await peekNormGain(nextTrack)) / 20) : 1;
+  if (!crossfading || activeEl !== outgoing) return; // cancelled/superseded while awaiting
+
+  const now = actx.currentTime;
+  const duration = Math.max(0.05, xfadeSeconds);
+  outGain.gain.cancelScheduledValues(now);
+  outGain.gain.setValueAtTime(outGain.gain.value, now);
+  outGain.gain.linearRampToValueAtTime(0, now + duration);
+  inGain.gain.cancelScheduledValues(now);
+  inGain.gain.setValueAtTime(inGain.gain.value, now);
+  inGain.gain.linearRampToValueAtTime(targetIn, now + duration);
+
+  xfadeTimer = setTimeout(() => finishCrossfade(nextIdx, outgoing, incoming), duration * 1000 + 80);
+}
+
+function finishCrossfade(nextIdx, outgoing, incoming) {
+  crossfading = false;
+  activeEl = incoming; // audio (the Proxy) now transparently reflects `incoming`
+  cur = nextIdx;
+  sel = nextIdx;
+  outgoing.pause();
+  outgoing.currentTime = 0;
+  outgoing.removeAttribute('src');
+  outgoing.load();
+  onTrackChanged(pl[nextIdx]);
+}
+
+function paintXfade() {
+  els.btnXfade.classList.toggle('active', xfadeSeconds > 0);
+  els.btnXfade.textContent = xfadeSeconds > 0 ? `XFD ${xfadeSeconds}S` : 'XFD';
+  els.btnXfade.title = xfadeSeconds > 0
+    ? `Crossfade: ${xfadeSeconds}s between tracks (click to cycle, radio excluded)`
+    : 'Crossfade: off (click to cycle 2–10s)';
+}
+
+// ------------------------------------------------------------
+// Sleep timer — a plain countdown, or a "stop at the next natural
+// boundary" flag checked from the auto-advance paths (doNext(true) and
+// the crossfade auto-trigger above). Fades the master gain out over a
+// few seconds, then pauses (not stops — a session you fell asleep to
+// should resume from where it was, not from track 1). In-memory only;
+// a page reload cancels it, same tradeoff as everything else here that
+// isn't written to settings.json every tick.
+// ------------------------------------------------------------
+let sleepMode = 'off'; // 'off' | 'timer' | 'track' | 'queue'
+let sleepAt = 0;
+let sleepFireTimer = null;
+let sleepTickTimer = null;
+const SLEEP_PRESETS = [15, 30, 45, 60, 90, 120]; // minutes
+
+// True when the CURRENT track ending should stop playback rather than
+// advance — used both to skip a would-be crossfade into the next track
+// and as doNext(true)'s own trigger. Shuffle has no meaningful "end of
+// queue", so queue-mode degrades to track-mode there.
+function sleepWouldStopHere() {
+  if (sleepMode === 'track') return true;
+  if (sleepMode === 'queue') {
+    if (shuffle) return true;
+    const base = cur >= 0 ? cur : (sel >= 0 ? sel - 1 : -1);
+    return base + 1 >= pl.length;
+  }
+  return false;
+}
+
+function clearSleepTimer() {
+  clearTimeout(sleepFireTimer);
+  clearInterval(sleepTickTimer);
+  sleepFireTimer = null;
+  sleepTickTimer = null;
+  sleepMode = 'off';
+  sleepAt = 0;
+  paintSleep();
+}
+
+function paintSleep() {
+  els.btnSleep.classList.toggle('active', sleepMode !== 'off');
+  if (sleepMode === 'timer') {
+    const mins = Math.max(0, Math.ceil((sleepAt - Date.now()) / 60000));
+    els.btnSleep.textContent = `SLP ${mins}M`;
+    els.btnSleep.title = `Sleep timer: ${mins} min left (click to change)`;
+  } else if (sleepMode === 'track') {
+    els.btnSleep.textContent = 'SLP TRK';
+    els.btnSleep.title = 'Sleep: pausing at the end of this track (click to change)';
+  } else if (sleepMode === 'queue') {
+    els.btnSleep.textContent = 'SLP END';
+    els.btnSleep.title = 'Sleep: pausing at the end of the queue (click to change)';
+  } else {
+    els.btnSleep.textContent = 'SLP';
+    els.btnSleep.title = 'Sleep timer: off (click to set)';
+  }
+}
+
+function fireSleepTimer() {
+  const fadeSeconds = 4;
+  if (actx && masterGain) {
+    const now = actx.currentTime;
+    masterGain.gain.cancelScheduledValues(now);
+    masterGain.gain.setValueAtTime(masterGain.gain.value, now);
+    masterGain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
+  }
+  setTimeout(() => {
+    doPause();
+    applyVolume(); // restore the real master gain post-fade
+    toast('SLEEP TIMER — PLAYBACK PAUSED');
+  }, fadeSeconds * 1000);
+  clearSleepTimer();
+}
+
+function setSleepTimer(minutes) {
+  clearSleepTimer();
+  sleepMode = 'timer';
+  sleepAt = Date.now() + minutes * 60000;
+  sleepFireTimer = setTimeout(fireSleepTimer, minutes * 60000);
+  sleepTickTimer = setInterval(paintSleep, 15000);
+  paintSleep();
+  toast(`SLEEP TIMER: ${minutes} MIN`);
+}
+
+function setSleepBoundary(mode) {
+  clearSleepTimer();
+  sleepMode = mode; // 'track' | 'queue'
+  paintSleep();
+  toast(mode === 'track' ? 'SLEEP: PAUSING AT END OF TRACK' : 'SLEEP: PAUSING AT END OF QUEUE');
+}
+
+function openSleepPicker() {
+  const body = openModal('SLEEP TIMER');
+  body.innerHTML = `
+    <div class="utilgrid">
+      ${SLEEP_PRESETS.map((m) => `<button class="btn" data-sleep="${m}">${m} MIN</button>`).join('')}
+      <button class="btn${sleepMode === 'track' ? ' active' : ''}" data-sleep="track">END OF TRACK</button>
+      <button class="btn${sleepMode === 'queue' ? ' active' : ''}" data-sleep="queue">END OF QUEUE</button>
+      <button class="btn${sleepMode === 'off' ? ' active' : ''}" data-sleep="off">OFF</button>
+    </div>
+    <div class="mhint">FADES OUT OVER 4S, THEN PAUSES ▸ SHUFFLE TREATS "END OF QUEUE" AS "END OF TRACK" ▸ RELOADING THE PAGE CANCELS IT</div>`;
+  body.querySelector('.utilgrid').addEventListener('click', (e) => {
+    const val = e.target.closest('[data-sleep]')?.dataset.sleep;
+    if (!val) return;
+    if (val === 'off') clearSleepTimer();
+    else if (val === 'track' || val === 'queue') setSleepBoundary(val);
+    else setSleepTimer(Number(val));
+    closeModal();
+  });
+}
+
+els.btnSleep.addEventListener('click', openSleepPicker);
 
 // ------------------------------------------------------------
 // Playlist rendering + mutations
@@ -1776,6 +2299,7 @@ function sessionPayload() {
     visMode,
     theme: themeName,
     normalize,
+    xfade: xfadeSeconds,
     panels: {
       eq: !els.eqPanel.classList.contains('collapsed'),
       pl: !els.plPanel.classList.contains('collapsed')
@@ -1853,6 +2377,7 @@ async function restoreSession() {
   if (VIS_MODES.includes(s.visMode)) setVisualizer(s.visMode, true);
   if (typeof s.theme === 'string' && THEMES[s.theme]) applyTheme(s.theme, true);
   if (typeof s.normalize === 'boolean') { normalize = s.normalize; applyNormGain(); }
+  if (XFADE_STEPS.includes(Number(s.xfade))) { xfadeSeconds = Number(s.xfade); paintXfade(); }
   if (typeof s.obsEq === 'boolean') { obsEq = s.obsEq; els.btnEqObs.classList.toggle('active', obsEq); }
   if (s.dsp?.modules) {
     dspModules = sanitizeDspModules(s.dsp.modules);
@@ -1910,7 +2435,11 @@ async function restoreSession() {
     };
 
     if (plan.resumeAt > 0 || plan.wasPlaying) {
-      audio.addEventListener('loadedmetadata', () => {
+      // Targets activeEl directly, not the broadcasting audio.addEventListener
+      // — this fires once for THIS src assignment; going through the proxy
+      // would also arm on the idle deck and could misfire against some
+      // unrelated track the first time a future crossfade uses it.
+      activeEl.addEventListener('loadedmetadata', () => {
         if (plan.resumeAt > 0) {
           audio.currentTime = Math.min(plan.resumeAt, Math.max(0, (audio.duration || plan.resumeAt) - 0.5));
           audio.dispatchEvent(new Event('timeupdate'));
@@ -2004,7 +2533,14 @@ function scheduleRadioReconnect(t) {
   }, delay);
 }
 
-audio.addEventListener('timeupdate', () => {
+// Every listener below is registered on BOTH audio elements (see the audio
+// Proxy's addEventListener special-case), since either one can be "active"
+// depending on crossfade state. The e.currentTarget guard is what keeps
+// only the currently-active element's events driving shared UI/state — the
+// other element's events (buffering ahead, or fading out post-swap) are
+// either ignored here or handled separately by the crossfade engine.
+audio.addEventListener('timeupdate', (e) => {
+  if (e.currentTarget !== activeEl) return;
   const d = audio.duration;
   const t = audio.currentTime;
   els.timeMain.textContent = showRemain && isFinite(d) ? `-${fmtClock(d - t)}` : fmtClock(t);
@@ -2015,23 +2551,33 @@ audio.addEventListener('timeupdate', () => {
   }
   if (lastPlayState === 'play' && Date.now() - lastStateSent > 1000) sendState();
   if (lastPlayState === 'play' && Date.now() - lastPosSaved > 3000) scheduleSession();
+  if (xfadeSeconds > 0 && !crossfading && repeat !== 'one' && isFinite(d) && d > 0 &&
+      (d - t) <= xfadeSeconds && pl[cur]?.storage !== 'radio' && !sleepWouldStopHere()) {
+    const n = resolveNextIndex();
+    if (n >= 0) beginCrossfade(n);
+  }
 });
-audio.addEventListener('playing', () => {
+audio.addEventListener('playing', (e) => {
+  if (e.currentTarget !== activeEl) return;
   setPlayState('play');
   errStreak = 0;
   if (pl[cur]?.storage === 'radio') { radioRetry = 0; toast(`RADIO CONNECTED — ${pl[cur].title.toUpperCase()}`); }
 });
-audio.addEventListener('seeked', () => { scheduleSession(); });
-audio.addEventListener('pause', () => {
+audio.addEventListener('seeked', (e) => { if (e.currentTarget === activeEl) scheduleSession(); });
+audio.addEventListener('pause', (e) => {
+  if (e.currentTarget !== activeEl) return;
   if (unloading) return; // teardown pause on tab close — keep 'play' saved
   if (audio.currentTime > 0 && !audio.ended) setPlayState('pause');
 });
-audio.addEventListener('ended', () => {
+audio.addEventListener('ended', (e) => {
+  if (e.currentTarget !== activeEl) return;
+  if (crossfading) return; // finishCrossfade's own timer is already handling the handoff
   if (pl[cur]?.storage === 'radio') { scheduleRadioReconnect(pl[cur]); return; }
   if (repeat === 'one') { audio.currentTime = 0; audio.play().catch(() => {}); return; }
   doNext(true);
 });
-audio.addEventListener('error', () => {
+audio.addEventListener('error', (e) => {
+  if (e.currentTarget !== activeEl) return;
   const t = cur >= 0 ? pl[cur] : null;
   if (t?.storage === 'radio') {
     scheduleRadioReconnect(t);
@@ -2062,6 +2608,12 @@ els.btnShuffle.addEventListener('click', () => {
 els.btnRepeat.addEventListener('click', () => {
   repeat = repeat === 'off' ? 'all' : repeat === 'all' ? 'one' : 'off';
   paintRepeat();
+  scheduleSession();
+});
+els.btnXfade.addEventListener('click', () => {
+  xfadeSeconds = XFADE_STEPS[(XFADE_STEPS.indexOf(xfadeSeconds) + 1) % XFADE_STEPS.length];
+  if (xfadeSeconds === 0) cancelCrossfade();
+  paintXfade();
   scheduleSession();
 });
 
@@ -2209,8 +2761,12 @@ document.addEventListener('keydown', (e) => {
 // Loudness normalization — per-track gain toward the server's
 // LUFS target, applied through the Web Audio preamp.
 // ------------------------------------------------------------
+function activeTrackGain() {
+  return activeEl === audioA ? gainA : gainB;
+}
 function applyNormGain() {
-  if (preamp) preamp.gain.value = normalize ? Math.pow(10, normGain / 20) : 1;
+  const node = activeTrackGain();
+  if (node) node.gain.value = normalize ? Math.pow(10, normGain / 20) : 1;
   if (!normalize) resetOutputLeveler(true);
   if (els.btnNorm) {
     els.btnNorm.classList.toggle('active', normalize);
@@ -2273,6 +2829,11 @@ function applyRemoteSettings(settings) {
     els.btnShuffle.classList.toggle('active', shuffle);
   }
   if (['off', 'all', 'one'].includes(settings.repeat)) { repeat = settings.repeat; paintRepeat(); }
+  if (XFADE_STEPS.includes(Number(settings.xfade))) {
+    xfadeSeconds = Number(settings.xfade);
+    if (xfadeSeconds === 0) cancelCrossfade();
+    paintXfade();
+  }
   if (typeof settings.normalize === 'boolean') {
     normalize = settings.normalize;
     applyNormGain();
@@ -2315,9 +2876,10 @@ function renameLoadedPlaylist({ from, to }) {
   renderPlaylist();
   const track = cur >= 0 ? pl[cur] : null;
   if (track?.storage === 'playlist' && audio.src) {
+    cancelCrossfade();
     audio.pause();
     audio.src = trackUrl(track);
-    audio.addEventListener('loadedmetadata', () => {
+    activeEl.addEventListener('loadedmetadata', () => {
       if (seekTo > 0) audio.currentTime = Math.min(seekTo, Math.max(0, (audio.duration || seekTo) - .5));
       if (savedState === 'play') audio.play().catch(() => {});
       else setPlayState(savedState);
@@ -2367,6 +2929,14 @@ function wsConnect() {
       if (normalize && cur >= 0 && trackKey(pl[cur]) === msg.trackKey && typeof msg.gain === 'number') {
         normGain = msg.gain;
         applyNormGain();
+      }
+      return;
+    }
+    if (msg.type === 'waveform') {
+      if (cur >= 0 && trackKey(pl[cur]) === msg.trackKey && Array.isArray(msg.peaks)) {
+        waveformCache.set(msg.trackKey, msg.peaks);
+        waveformPeaks = msg.peaks;
+        waveformState = 'ready';
       }
       return;
     }
@@ -2481,16 +3051,19 @@ wsConnect();
 // Boot
 // ------------------------------------------------------------
 window.addEventListener('resize', sizeVis);
+window.addEventListener('resize', sizeSeekWave);
 
 (async function init() {
   buildEQ();
   applyVolume();
   applyBalance();
   paintRepeat();
+  paintXfade();
   setVisualizer(visMode, true);
   els.btnEqToggle.classList.add('active');
   els.btnPlToggle.classList.add('active');
   sizeVis();
+  sizeSeekWave();
   drawVis();
   renderPlaylist();
   setMarquee('NEONAMP READY ▞▞ PRESS EJECT FOR PLAYLIST MANAGER ▞▞ COIN-OPERATED AUDIO');

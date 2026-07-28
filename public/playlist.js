@@ -43,7 +43,7 @@ const els = {
   toast: $('#toast'), liveState: $('#liveState'), nowTitle: $('#nowTitle'), nowMeta: $('#nowMeta'), nowTime: $('#nowTime'),
   controlStatus: $('#controlStatus'), soundDetails: $('#soundDetails'), ctlPrev: $('#ctlPrev'), ctlPlay: $('#ctlPlay'), ctlPause: $('#ctlPause'), ctlStop: $('#ctlStop'), ctlNext: $('#ctlNext'),
   ctlVol: $('#ctlVol'), ctlVolVal: $('#ctlVolVal'), ctlBal: $('#ctlBal'), ctlBalVal: $('#ctlBalVal'),
-  ctlNorm: $('#ctlNorm'), ctlShuffle: $('#ctlShuffle'), ctlRepeat: $('#ctlRepeat'), ctlVis: $('#ctlVis'), ctlTheme: $('#ctlTheme'),
+  ctlNorm: $('#ctlNorm'), ctlShuffle: $('#ctlShuffle'), ctlRepeat: $('#ctlRepeat'), ctlXfade: $('#ctlXfade'), ctlVis: $('#ctlVis'), ctlTheme: $('#ctlTheme'),
   ctlEqOn: $('#ctlEqOn'), ctlObsEq: $('#ctlObsEq'), ctlEqPreset: $('#ctlEqPreset'), ctlEqBands: $('#ctlEqBands'),
   ctlDspPreset: $('#ctlDspPreset'), ctlDspType: $('#ctlDspType'), ctlDspAdd: $('#ctlDspAdd'), ctlDspList: $('#ctlDspList')
 };
@@ -61,8 +61,9 @@ let dragFrom = -1;
 let toastTimer = null;
 let lastPlaylistClick = '', lastPlaylistClickAt = 0;
 let lastTrackClick = -1, lastTrackClickAt = 0;
+const XFADE_STEPS = [0, 2, 4, 6, 8, 10];
 let controlSettings = {
-  volume: 80, balance: 0, shuffle: false, repeat: 'off', normalize: true,
+  volume: 80, balance: 0, shuffle: false, repeat: 'off', normalize: true, xfade: 0,
   visMode: 'bars', theme: 'NEON', obsEq: false,
   eq: { on: true, bands: new Array(10).fill(0), preset: 'FLAT' }, dsp: { modules: [] }
 };
@@ -1129,6 +1130,9 @@ function renderControlSettings() {
   els.ctlShuffle.classList.toggle('active', !!controlSettings.shuffle);
   els.ctlRepeat.classList.toggle('active', controlSettings.repeat !== 'off');
   els.ctlRepeat.textContent = `REP: ${String(controlSettings.repeat || 'off').toUpperCase()}`;
+  const xfade = Number(controlSettings.xfade) || 0;
+  els.ctlXfade.classList.toggle('active', xfade > 0);
+  els.ctlXfade.textContent = xfade > 0 ? `XFD: ${xfade}S` : 'XFD: OFF';
   els.ctlVis.value = controlSettings.visMode || 'bars';
   els.ctlTheme.value = controlSettings.theme || 'NEON';
   els.ctlEqOn.classList.toggle('active', controlSettings.eq.on !== false);
@@ -1230,6 +1234,11 @@ function initSoundControls() {
   els.ctlRepeat.addEventListener('click', () => {
     controlSettings.repeat = ({ off: 'all', all: 'one', one: 'off' })[controlSettings.repeat] || 'off';
     renderControlSettings(); queueControl({ repeat: controlSettings.repeat });
+  });
+  els.ctlXfade.addEventListener('click', () => {
+    const cur = Number(controlSettings.xfade) || 0;
+    controlSettings.xfade = XFADE_STEPS[(XFADE_STEPS.indexOf(cur) + 1) % XFADE_STEPS.length];
+    renderControlSettings(); queueControl({ xfade: controlSettings.xfade });
   });
   els.ctlVis.addEventListener('change', () => { controlSettings.visMode = els.ctlVis.value; queueControl({ visMode: controlSettings.visMode }); });
   els.ctlTheme.addEventListener('change', () => { controlSettings.theme = els.ctlTheme.value; queueControl({ theme: controlSettings.theme }); });

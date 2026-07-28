@@ -321,7 +321,17 @@ input[type='range']::-moz-range-thumb {
   box-shadow: 0 0 8px rgba(var(--cyan-rgb), .8);
 }
 
-.seek { width: 100%; margin-top: 8px; }
+.seekwave {
+  display: block;
+  width: 100%;
+  height: 30px;
+  margin-top: 8px;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--inset);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .8);
+}
+.seek { width: 100%; margin-top: 4px; }
 
 /* ── transport ── */
 .transport {

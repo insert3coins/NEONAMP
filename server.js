@@ -1262,6 +1262,132 @@ async function serveLoudness(req, res) {
 }
 
 // ------------------------------------------------------------
+// Waveform seek bar — amplitude envelope via ffmpeg, cached in
+// ./waveform-cache.json exactly like the loudness cache above (same
+// key scheme, same background queue/WS-push shape). Decoded to a low
+// fixed sample rate so even an hours-long YouTube podcast stays a
+// modest buffer (mono, 1kHz ~= 7MB/hour) instead of needing the whole
+// file decoded at full quality just to draw ~400 bars.
+// ------------------------------------------------------------
+const WAVEFORM_CACHE_FILE = path.join(__dirname, 'waveform-cache.json');
+const WAVEFORM_BUCKETS = 400;
+const WAVEFORM_SAMPLE_RATE = 1000;
+let waveCache = null;
+let waveDirty = false;
+const waveQueue = [];
+const waveQueued = new Set();
+let waveBusy = false;
+
+async function loadWaveCache() {
+  if (waveCache) return waveCache;
+  waveCache = await readJsonFile(WAVEFORM_CACHE_FILE, {});
+  return waveCache;
+}
+setInterval(() => {
+  if (!waveDirty || !waveCache) return;
+  waveDirty = false;
+  writeJsonFile(WAVEFORM_CACHE_FILE, waveCache).catch(() => {});
+}, 3000);
+
+function extractPeaks(full) {
+  return new Promise((resolve) => {
+    ffmpegBin().then((bin) => {
+      const args = [
+        '-hide_banner', '-nostats', '-i', full,
+        '-map', 'a:0', '-ac', '1', '-ar', String(WAVEFORM_SAMPLE_RATE),
+        '-f', 's16le', '-acodec', 'pcm_s16le', 'pipe:1'
+      ];
+      const child = spawn(bin, args, { windowsHide: true });
+      const chunks = [];
+      const timer = setTimeout(() => child.kill(), 10 * 60 * 1000);
+      child.stdout.on('data', (d) => chunks.push(d));
+      child.on('error', () => { clearTimeout(timer); resolve(null); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        const buf = Buffer.concat(chunks);
+        const sampleCount = Math.floor(buf.length / 2);
+        if (sampleCount < 1) return resolve(null);
+        const peaks = new Array(WAVEFORM_BUCKETS).fill(0);
+        const perBucket = sampleCount / WAVEFORM_BUCKETS;
+        let maxAbs = 1;
+        for (let b = 0; b < WAVEFORM_BUCKETS; b++) {
+          const start = Math.floor(b * perBucket);
+          const end = Math.max(start + 1, Math.floor((b + 1) * perBucket));
+          let peak = 0;
+          for (let i = start; i < end && i < sampleCount; i++) {
+            const v = Math.abs(buf.readInt16LE(i * 2));
+            if (v > peak) peak = v;
+          }
+          peaks[b] = peak;
+          if (peak > maxAbs) maxAbs = peak;
+        }
+        resolve(peaks.map((v) => Math.round((v / maxAbs) * 1000) / 1000));
+      });
+    });
+  });
+}
+
+async function analyzeWaveform(ref) {
+  if (!ref) return null;
+  let st;
+  try { st = await fs.stat(ref.full); } catch { return null; }
+  const cache = await loadWaveCache();
+  const hit = cache[ref.key];
+  if (hit && hit.key === loudKey(st)) return hit;
+  if (!(await ffmpegAvailable())) return null;
+  const peaks = await extractPeaks(ref.full);
+  if (!peaks) return null;
+  const entry = { key: loudKey(st), peaks, at: Date.now() };
+  cache[ref.key] = entry;
+  waveDirty = true;
+  return entry;
+}
+
+function enqueueWaveform(ref) {
+  if (!ref || waveQueued.has(ref.key)) return;
+  waveQueued.add(ref.key);
+  waveQueue.push(ref);
+  pumpWaveform();
+}
+
+async function pumpWaveform() {
+  if (waveBusy) return;
+  const ref = waveQueue.shift();
+  if (!ref) return;
+  waveBusy = true;
+  try {
+    const entry = await analyzeWaveform(ref);
+    if (entry) {
+      const data = JSON.stringify({
+        type: 'waveform', trackKey: ref.key, file: ref.rel,
+        storage: ref.storage, playlist: ref.playlist, peaks: entry.peaks
+      });
+      for (const c of wssRef.clients) {
+        if (c.readyState === WebSocket.OPEN) { try { c.send(data); } catch { /* ignore */ } }
+      }
+    }
+  } catch { /* keep pumping */ }
+  waveQueued.delete(ref.key);
+  waveBusy = false;
+  if (waveQueue.length) setTimeout(pumpWaveform, 250);
+}
+
+app.get('/api/waveform', async (req, res) => {
+  if (!(await ffmpegAvailable())) return res.json({ status: 'unavailable' });
+  const ref = requestTrackRef(req);
+  if (!ref) return res.status(400).json({ error: 'Invalid track source' });
+  let st;
+  try { st = await fs.stat(ref.full); } catch { return res.status(404).json({ error: 'Not found' }); }
+  const cache = await loadWaveCache();
+  const hit = cache[ref.key];
+  if (hit && hit.key === loudKey(st)) {
+    return res.json({ status: 'ready', peaks: hit.peaks });
+  }
+  enqueueWaveform(ref); // result arrives over /ws
+  res.json({ status: 'pending' });
+});
+
+// ------------------------------------------------------------
 // Playlists — metadata in ./playlists. New local tracks retain absolute
 // source paths. Private revisions remain supported for older playlists.
 // ------------------------------------------------------------
@@ -2143,8 +2269,15 @@ app.post('/api/session', writeSettings); // navigator.sendBeacon on tab close
 // It updates only player preferences (never the queue/position) and relays the
 // same patch to every open deck/OBS jukebox for immediate application.
 const CONTROL_COMMANDS = new Set(['next', 'prev', 'pause', 'resume', 'stop']);
-const CONTROL_VIS = new Set(['bars', 'scope', 'vu', 'radial', 'waterfall', 'dots', 'particles', 'off']);
-const CONTROL_THEMES = new Set(['NEON', 'C64', 'AMBER TERM', 'VAPORWAVE', 'GREEN PHOS']);
+const CONTROL_VIS = new Set([
+  'bars', 'scope', 'vu', 'radial', 'waterfall', 'dots', 'particles',
+  'lissajous', 'tunnel', 'spiral', 'pulse', 'off'
+]);
+const CONTROL_THEMES = new Set([
+  'NEON', 'C64', 'AMBER TERM', 'VAPORWAVE', 'GREEN PHOS',
+  'CRIMSON', 'ICE', 'SUNSET', 'TOXIC', 'DEEP SPACE', 'MIAMI', 'GOLD RUSH', 'BLUE PHOSPHOR', 'STEEL', 'TRON GRID'
+]);
+const CONTROL_XFADE = new Set([0, 2, 4, 6, 8, 10]);
 const CONTROL_DSP = {
   compressor: [0, 1], limiter: [0, 1], width: [0, 2], mono: [0, 1],
   bass: [0, 12], reverb: [0, .65]
@@ -2159,6 +2292,7 @@ function sanitizedControlSettings(input) {
   if (typeof input.shuffle === 'boolean') clean.shuffle = input.shuffle;
   if (['off', 'all', 'one'].includes(input.repeat)) clean.repeat = input.repeat;
   if (typeof input.normalize === 'boolean') clean.normalize = input.normalize;
+  if (CONTROL_XFADE.has(Number(input.xfade))) clean.xfade = Number(input.xfade);
   if (typeof input.obsEq === 'boolean') clean.obsEq = input.obsEq;
   if (CONTROL_VIS.has(input.visMode)) clean.visMode = input.visMode;
   if (CONTROL_THEMES.has(input.theme)) clean.theme = input.theme;

@@ -44,10 +44,12 @@
         <span class="spacer"></span>
         <button class="mode" id="btnVis" title="Choose visualizer">VIS</button>
         <button class="mode" id="btnNorm" title="Loudness normalization">NORM</button>
+        <button class="mode" id="btnXfade" title="Crossfade: off (click to cycle 2–10s)">XFD</button>
         <button class="mode" id="btnShuffle" title="Shuffle (S)">SHUF</button>
         <button class="mode" id="btnRepeat" title="Repeat: off / all / one (R)">REP</button>
       </div>
 
+      <canvas id="seekWave" class="seekwave" width="440" height="30" aria-hidden="true" title="Click or drag to seek"></canvas>
       <input type="range" id="seek" class="seek" min="0" max="1000" value="0" step="1" aria-label="Seek">
 
       <div class="transport">
@@ -73,6 +75,7 @@
         <button class="mode" id="btnEqToggle" title="Show/hide equalizer">EQ</button>
         <button class="mode" id="btnPlToggle" title="Show/hide playlist">PL</button>
         <button class="mode" id="btnTheme" title="Theme: NEON (click to cycle)">THM</button>
+        <button class="mode" id="btnSleep" title="Sleep timer: off (click to set)">SLP</button>
       </div>
 
       <div class="mixers">

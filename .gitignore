@@ -30,6 +30,7 @@
 /settings.json
 /loudness-cache.json
 /play-counts.json
+/waveform-cache.json
 
 # ── bundled ffmpeg ────────────────────────────────────────────────────
 # ~100 MB each: over GitHub's hard per-file limit. Install ffmpeg on PATH

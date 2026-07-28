@@ -25,9 +25,13 @@ use hittest::{Edge, hit_test};
 /// style applies in this shell (14px/10px, not the browser's 28px/60px —
 /// there's no page here for that padding to breathe on, just a window).
 /// Height is the deck's natural stacked height with EQ + playlist expanded
-/// (the default state), 914px, plus that same trimmed padding: ~942px,
-/// rounded up a little for cross-system font-metrics slop.
-const DEFAULT_SIZE: (f64, f64) = (500.0, 950.0);
+/// (the default state) — 958px including the waveform seek strip — plus
+/// that same trimmed padding: ~986px, rounded up a little for cross-system
+/// font-metrics slop. Only matters for the first instant anyway: app.js
+/// calls syncDesktopWindowSize() once at boot and self-corrects to
+/// whatever the real content needs, same mechanism as the EQ/PL toggle
+/// auto-resize.
+const DEFAULT_SIZE: (f64, f64) = (500.0, 995.0);
 const MIN_SIZE: (f64, f64) = (420.0, 340.0);
 /// `--void`, so resizing never flashes white behind the page.
 const VOID: (u8, u8, u8, u8) = (0x07, 0x04, 0x0f, 0xff);

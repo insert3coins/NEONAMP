@@ -434,10 +434,20 @@ const VALIGN = P.get('valign');                    // top | middle | bottom (def
 
 const THEMEP = (P.get('theme') || '').toUpperCase();
 const VIS_PIN = P.has('vis');
-let visMode = ['bars', 'scope', 'vu', 'radial', 'waterfall', 'dots', 'particles', 'off'].includes(VISREQ) ? VISREQ : 'bars';
+const OBS_VIS_MODES = [
+  'bars', 'scope', 'vu', 'radial', 'waterfall', 'dots', 'particles',
+  'lissajous', 'tunnel', 'spiral', 'pulse', 'off'
+];
+let visMode = OBS_VIS_MODES.includes(VISREQ) ? VISREQ : 'bars';
 const VIS_LABELS = {
   bars: 'SPECTRUM BARS', scope: 'OSCILLOSCOPE', vu: 'VU METER', radial: 'RADIAL CORE',
-  waterfall: 'WATERFALL', dots: 'DOT MATRIX', particles: 'PARTICLE BURST', off: 'VISUALIZER OFF'
+  waterfall: 'WATERFALL', dots: 'DOT MATRIX', particles: 'PARTICLE BURST',
+  // LISSAJOUS needs true stereo waveform data the overlay never receives
+  // (the deck only ever broadcasts a mono FFT/waveform over /ws) — pinning
+  // it here still shows the right label, but the frame() dispatch below
+  // has no lissajous branch, so it falls back to bars.
+  lissajous: 'LISSAJOUS X-Y', tunnel: 'WARP TUNNEL', spiral: 'SPIRAL SPECTRUM', pulse: 'SONAR PULSE',
+  off: 'VISUALIZER OFF'
 };
 
 // theme palettes (mirror of the deck's engine)
@@ -721,6 +731,72 @@ function drawParticles(playing) {
   g.globalAlpha = 1;
 }
 
+let tunnelPhase = 0;
+function drawTunnel() {
+  const bass = (disp[0] + disp[1] + disp[2]) / 3;
+  tunnelPhase += 0.01 + bass * 0.03;
+  const cx = vw / 2, cy = vh / 2, maxR = Math.hypot(cx, cy), rings = 12;
+  g.save(); g.translate(cx, cy);
+  for (let i = rings; i >= 1; i--) {
+    const t = (i / rings + tunnelPhase * 0.15) % 1, r = t * maxR;
+    const v = disp[i % BARS];
+    const sides = 24;
+    g.beginPath();
+    for (let s = 0; s <= sides; s++) {
+      const a = (s / sides) * Math.PI * 2 + tunnelPhase * (i % 2 ? 1 : -1);
+      const wob = 1 + v * 0.25 * Math.sin(a * 3 + tunnelPhase * 4);
+      s === 0 ? g.moveTo(Math.cos(a) * r * wob, Math.sin(a) * r * wob) : g.lineTo(Math.cos(a) * r * wob, Math.sin(a) * r * wob);
+    }
+    g.closePath();
+    g.strokeStyle = i % 3 === 0 ? VIS_COLORS.c3 : i % 2 === 0 ? VIS_COLORS.peak : VIS_COLORS.c1;
+    g.globalAlpha = Math.max(.05, (1 - t) * (0.35 + v * 0.65));
+    g.lineWidth = 1 + v * 2;
+    g.stroke();
+  }
+  g.restore(); g.globalAlpha = 1;
+}
+
+let spiralPhase = 0;
+function drawSpiral() {
+  spiralPhase += 0.006;
+  const cx = vw / 2, cy = vh / 2, maxR = Math.min(vw, vh) / 2 - 4, turns = 2.4;
+  g.save(); g.translate(cx, cy);
+  for (let i = 0; i < BARS; i++) {
+    const v = disp[i];
+    const a = (i / BARS) * Math.PI * 2 * turns + spiralPhase;
+    const r = (i / BARS) * maxR, len = 3 + v * 14;
+    g.strokeStyle = v > .7 ? VIS_COLORS.peak : v > .4 ? VIS_COLORS.c3 : VIS_COLORS.c1;
+    g.globalAlpha = .35 + v * .65;
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    g.lineTo(Math.cos(a) * (r + len), Math.sin(a) * (r + len));
+    g.stroke();
+  }
+  g.restore(); g.globalAlpha = 1;
+}
+
+let pulseRings = [], pulseLastBass = 0;
+function drawPulse(playing) {
+  const bass = playing ? (disp[0] + disp[1] + disp[2]) / 3 : 0;
+  const cx = vw / 2, cy = vh / 2, maxR = Math.hypot(cx, cy);
+  if (bass > .35 && bass > pulseLastBass + .08 && pulseRings.length < 8) pulseRings.push({ r: 4, life: 1, strength: bass });
+  pulseLastBass = bass * .7 + pulseLastBass * .3;
+  g.save(); g.translate(cx, cy);
+  pulseRings = pulseRings.filter((ring) => {
+    ring.r += 2.4 + ring.strength * 2.5; ring.life -= .018;
+    if (ring.life <= 0 || ring.r > maxR) return false;
+    g.strokeStyle = ring.strength > .7 ? VIS_COLORS.peak : VIS_COLORS.c1;
+    g.globalAlpha = Math.max(0, ring.life) * .8;
+    g.lineWidth = 1.5 + ring.strength * 2;
+    g.beginPath(); g.arc(0, 0, ring.r, 0, Math.PI * 2); g.stroke();
+    return true;
+  });
+  g.fillStyle = VIS_COLORS.c3; g.globalAlpha = .3 + bass * .6;
+  g.beginPath(); g.arc(0, 0, 4 + bass * 10, 0, Math.PI * 2); g.fill();
+  g.restore(); g.globalAlpha = 1;
+}
+
 // ── main loop ───────────────────────────────────────────
 function frame(now) {
   requestAnimationFrame(frame);
@@ -743,6 +819,9 @@ function frame(now) {
   else if (visMode === 'waterfall') drawWaterfall();
   else if (visMode === 'dots') drawDots(playing || DEMO);
   else if (visMode === 'particles') drawParticles(playing || DEMO);
+  else if (visMode === 'tunnel') drawTunnel();
+  else if (visMode === 'spiral') drawSpiral();
+  else if (visMode === 'pulse') drawPulse(playing || DEMO);
   else if (visMode !== 'off') drawBars(playing || DEMO);
 
   if (state) {
