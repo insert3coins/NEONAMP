@@ -1932,6 +1932,44 @@ function queueYoutubeStubs(stubs, playlistName) {
   }
 }
 
+// !request's entire job: one video, into one review playlist, capped and
+// tagged with who asked. Deliberately narrower than the /youtube endpoint
+// above — no playlist URLs (a single chat command dropping hundreds of
+// tracks into the queue is exactly the abuse case a request queue exists
+// to avoid), no youtubeSources bookkeeping (nothing here should ever
+// auto-resync). Creates the playlist file on first request if it doesn't
+// exist yet, same as saving a new playlist from the UI would.
+async function addYoutubeRequest(playlistName, url, requestedBy) {
+  const safeUrl = safeYoutubeUrl(url);
+  if (!safeUrl) return { ok: false, error: "that doesn't look like a supported link" };
+  if (!(await ytDlpAvailable())) return { ok: false, error: 'the downloader is unavailable right now' };
+
+  const playlistFile = path.join(PLAYLIST_DIR, `${playlistName}.json`);
+  const data = await readJsonFile(playlistFile, null)
+    || { version: 2, name: playlistName, saved: new Date().toISOString(), tracks: [] };
+  const existing = Array.isArray(data.tracks) ? data.tracks : [];
+  if (existing.length >= MAX_REQUEST_QUEUE) {
+    return { ok: false, error: `the request queue is full (${MAX_REQUEST_QUEUE}) — ask the streamer to clear it` };
+  }
+
+  let info;
+  try { info = await resolveYoutube(safeUrl); }
+  catch { return { ok: false, error: "couldn't resolve that link" }; }
+  if (Array.isArray(info.entries)) {
+    return { ok: false, error: 'playlist links are not supported — request a single video' };
+  }
+
+  const existingIds = existing.filter((t) => t?.storage === 'youtube').map((t) => t.videoId);
+  const stubs = buildYoutubeStubs([info], info, false, existingIds)
+    .map((s) => (requestedBy ? { ...s, requestedBy } : s));
+  if (!stubs.length) return { ok: false, error: 'that one is already in the queue' };
+
+  const next = { ...data, version: 2, name: playlistName, saved: new Date().toISOString(), tracks: [...existing, ...stubs] };
+  await writeJsonFile(playlistFile, next);
+  queueYoutubeStubs(stubs, playlistName);
+  return { ok: true, title: stubs[0].title, artist: stubs[0].artist };
+}
+
 // A single video downloads inline so it is instantly playable; a playlist
 // URL is resolved (fast — no audio fetched yet) and its videos queued for
 // background download, one at a time, with progress over /ws.
@@ -2423,6 +2461,8 @@ let lastSongCommandAt = 0;
 let songCommandInFlight = false;
 let lastAnnouncedFile = '';
 let lastAnnouncedAt = 0;
+const requestCooldowns = new Map(); // chatter_user_id -> last !request timestamp (ms)
+const MAX_REQUEST_QUEUE = 40; // pending tracks in the chat-request playlist before !request starts refusing
 
 async function readJsonFile(file, fallback) {
   try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return fallback; }
@@ -2444,7 +2484,10 @@ function defaultTwitchConfig() {
       commandsEnabled: false,           // !next/!prev/!pause/!resume (broadcaster/mod/VIP)
       nowPlayingEnabled: false,         // auto-announce track changes
       nowPlayingTemplate: 'Now playing: {title} by {artist} {artistUrl}',
-      songCommandCooldownSec: 30
+      songCommandCooldownSec: 30,
+      requestCommandEnabled: false,     // !request <url> — subscribers/mods/broadcaster, queued for review
+      requestCommandCooldownSec: 300,
+      requestPlaylistName: 'Requests'
     }
   };
 }
@@ -2469,7 +2512,13 @@ function sanitizeTwitchConfig(input) {
         ? c.nowPlayingTemplate.trim().slice(0, 300) : d.chat.nowPlayingTemplate,
       songCommandCooldownSec: Number.isFinite(c.songCommandCooldownSec)
         ? Math.max(0, Math.min(3600, Math.floor(c.songCommandCooldownSec)))
-        : d.chat.songCommandCooldownSec
+        : d.chat.songCommandCooldownSec,
+      requestCommandEnabled: !!c.requestCommandEnabled,
+      requestCommandCooldownSec: Number.isFinite(c.requestCommandCooldownSec)
+        ? Math.max(0, Math.min(3600, Math.floor(c.requestCommandCooldownSec)))
+        : d.chat.requestCommandCooldownSec,
+      requestPlaylistName: (typeof c.requestPlaylistName === 'string' && safeName(c.requestPlaylistName))
+        ? safeName(c.requestPlaylistName) : d.chat.requestPlaylistName
     }
   };
 }
@@ -2634,6 +2683,50 @@ async function handleChatCommand(event) {
     broadcastCmd(TRANSPORT[cmd]);
     return { action: TRANSPORT[cmd], sent: true };
   }
+
+  if (cmd === '!request') {
+    if (!cfg.chat.requestCommandEnabled) return { action: 'request', skipped: 'disabled' };
+    const chatterId = event.chatter_user_id || '';
+    const name = event.chatter_user_name || event.chatter_user_login || 'friend';
+    const isBroadcaster = chatterId && chatterId === event.broadcaster_user_id;
+    const privileged = Array.isArray(event.badges)
+      && event.badges.some((b) => b.set_id === 'moderator' || b.set_id === 'vip' || b.set_id === 'broadcaster');
+    const isSubscriber = Array.isArray(event.badges)
+      && event.badges.some((b) => b.set_id === 'subscriber' || b.set_id === 'founder');
+    const trusted = isBroadcaster || privileged;
+    if (!trusted && !isSubscriber) return { action: 'request', skipped: 'not subscriber' };
+
+    const say = async (message) => {
+      let sent = false;
+      try { await sendChat(message); sent = true; } catch { /* best effort */ }
+      return sent;
+    };
+
+    if (!trusted) {
+      const cooldownMs = cfg.chat.requestCommandCooldownSec * 1000;
+      const waitedMs = Date.now() - (requestCooldowns.get(chatterId) || 0);
+      if (waitedMs < cooldownMs) {
+        const sent = await say(`@${name} slow down — try again in ${Math.ceil((cooldownMs - waitedMs) / 1000)}s.`);
+        return { action: 'request', skipped: 'cooldown', sent };
+      }
+    }
+
+    // Preserve the URL's original casing — `text` above was lowercased for
+    // command matching, which would mangle a mixed-case video ID.
+    const arg = String(event?.message?.text || '').trim().split(/\s+/).slice(1).join(' ').trim();
+    if (!arg) {
+      const sent = await say(`@${name} usage: !request <youtube/soundcloud/mixcloud link>`);
+      return { action: 'request', skipped: 'no url', sent };
+    }
+
+    if (!trusted) requestCooldowns.set(chatterId, Date.now());
+    const result = await addYoutubeRequest(cfg.chat.requestPlaylistName, arg, name);
+    const sent = await say(result.ok
+      ? `@${name} added "${result.title}" to the request queue for review!`
+      : `@${name} couldn't add that — ${result.error}.`);
+    return { action: 'request', ...result, sent };
+  }
+
   return null;
 }
 
@@ -2963,6 +3056,7 @@ app.post('/api/twitch/simulate', async (req, res) => {
     message: { text },
     badges,
     chatter_user_id: req.body?.asBroadcaster ? 'b1' : 'u1',
+    chatter_user_name: typeof req.body?.name === 'string' ? req.body.name : undefined,
     broadcaster_user_id: 'b1'
   }).catch((err) => ({ error: err.message }));
   res.json({ ok: true, result });

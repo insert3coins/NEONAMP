@@ -278,7 +278,9 @@ function renderTracks() {
       <span class="kind${kindClass}"></span>
       <span class="duration"></span>`;
     item.querySelector('.trackname strong').textContent = track.title || 'Unknown track';
-    item.querySelector('.trackname small').textContent = track.artist || 'Unknown artist';
+    item.querySelector('.trackname small').textContent = track.requestedBy
+      ? `${track.artist || 'Unknown artist'} — requested by ${track.requestedBy}`
+      : (track.artist || 'Unknown artist');
     item.querySelector('.album').textContent = track.album || '—';
     item.querySelector('.kind').textContent = track.storage === 'radio' ? 'RADIO'
       : track.storage === 'youtube' ? youtubeKindText(ytJob, track)

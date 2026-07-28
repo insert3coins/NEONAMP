@@ -450,11 +450,24 @@ Commands (via EventSub `channel.chat.message`, replies via Helix):
 | `!song`    | everyone         | Posts the now-playing track (default 30s cooldown) |
 | `!next` / `!prev` | broadcaster, mods, VIPs | Skip forward / back      |
 | `!pause` / `!resume` | broadcaster, mods, VIPs | Pause / resume       |
+| `!request <link>` | subscribers, mods, VIPs, broadcaster | Queues a video for review (off by default, own cooldown) |
 
 `!song` reads the live `/ws` state, so it's correct whether the main
 deck or the OBS jukebox is playing — and the jukebox obeys the
 transport commands too, no Interact window needed. Optional
 auto-announce posts every track change (10s min gap).
+
+`!request` never plays anything automatically — it resolves a single
+video/track link (YouTube, SoundCloud, Mixcloud, Bandcamp; no playlist
+URLs) and adds it to a review playlist (**Requests** by default,
+renameable on the Twitch settings page), tagged with who asked for it.
+Open that playlist on `/playlist` like any other to listen, reorder,
+delete, or move tracks into a real set — nothing reaches the live
+queue until you put it there yourself. Mods, VIPs, and the broadcaster
+skip the per-viewer cooldown; everyone else gets one request per
+cooldown window (default 5 min). Capped at 40 pending requests at
+once — past that it tells the requester to wait for the streamer to
+clear some space, rather than growing forever.
 
 The message template supports `{title}` `{artist}` `{artistUrl}`
 `{album}` `{year}` `{file}` `{idx}` `{count}`. `{artistUrl}` is read
