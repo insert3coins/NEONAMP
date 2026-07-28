@@ -146,11 +146,14 @@ flushes the loudness cache before exit. Old installs migrate
 
 ## Themes
 
-**THM** on the deck cycles five palettes: NEON (default), C64,
-AMBER TERM, VAPORWAVE, and GREEN PHOS. Everything retints — panels,
-glows, sliders, and the canvas visualizers. Your pick persists in
-`settings.json`, and the OBS overlay follows it automatically (or pin
-one with `?theme=c64` etc. on the overlay URL).
+**THM** on the deck cycles fifteen palettes: NEON (default), C64,
+AMBER TERM, VAPORWAVE, GREEN PHOS, CRIMSON, ICE, SUNSET, TOXIC, DEEP
+SPACE, MIAMI, GOLD RUSH, BLUE PHOSPHOR, STEEL, and TRON GRID.
+Everything retints — panels, glows, sliders, and the canvas
+visualizers. Your pick persists in `settings.json`, and the OBS
+overlay follows it automatically (or pin one with `?theme=c64` etc.
+on the overlay URL — multi-word names need the space, e.g.
+`?theme=gold rush`).
 
 ## Loudness normalization
 

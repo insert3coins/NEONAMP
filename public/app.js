@@ -112,6 +112,106 @@ const THEMES = {
       '--cyan-rgb': '51, 255, 119', '--mag-rgb': '157, 255, 176', '--amber-rgb': '214, 255, 94'
     },
     vis: { c1: '#33ff77', c2: '#6fff9a', c3: '#9dffb0', peak: '#d6ff5e', dim: '#3f7a54' }
+  },
+  'CRIMSON': {
+    vars: {
+      '--void': '#12040a', '--panel': '#1e0810', '--panel2': '#280b16', '--inset': '#0a0206',
+      '--line': '#5c1220', '--line2': '#7d1a2c',
+      '--cyan': '#ff3355', '--mag': '#ff7a5c', '--amber': '#ffb84d',
+      '--text': '#ffd9e0', '--dim': '#8a5568',
+      '--cyan-rgb': '255, 51, 85', '--mag-rgb': '255, 122, 92', '--amber-rgb': '255, 184, 77'
+    },
+    vis: { c1: '#ff3355', c2: '#ff5a4a', c3: '#ff7a5c', peak: '#ffb84d', dim: '#8a5568' }
+  },
+  'ICE': {
+    vars: {
+      '--void': '#050a12', '--panel': '#0a141f', '--panel2': '#0f1c2c', '--inset': '#030810',
+      '--line': '#1c3a55', '--line2': '#285074',
+      '--cyan': '#6fe3ff', '--mag': '#9fc8ff', '--amber': '#eaf6ff',
+      '--text': '#dbf0ff', '--dim': '#4f7a99',
+      '--cyan-rgb': '111, 227, 255', '--mag-rgb': '159, 200, 255', '--amber-rgb': '234, 246, 255'
+    },
+    vis: { c1: '#6fe3ff', c2: '#8fd9ff', c3: '#9fc8ff', peak: '#eaf6ff', dim: '#4f7a99' }
+  },
+  'SUNSET': {
+    vars: {
+      '--void': '#1a0a1f', '--panel': '#2a1030', '--panel2': '#38163e', '--inset': '#150819',
+      '--line': '#5c2050', '--line2': '#7d2c6a',
+      '--cyan': '#ff6b4a', '--mag': '#ff2f92', '--amber': '#ffc857',
+      '--text': '#ffe4d6', '--dim': '#9c6a8a',
+      '--cyan-rgb': '255, 107, 74', '--mag-rgb': '255, 47, 146', '--amber-rgb': '255, 200, 87'
+    },
+    vis: { c1: '#ff6b4a', c2: '#ff4f7a', c3: '#ff2f92', peak: '#ffc857', dim: '#9c6a8a' }
+  },
+  'TOXIC': {
+    vars: {
+      '--void': '#070d02', '--panel': '#0e1804', '--panel2': '#142206', '--inset': '#050a01',
+      '--line': '#2c4a08', '--line2': '#3d640c',
+      '--cyan': '#baff29', '--mag': '#6bff5e', '--amber': '#f2ff5e',
+      '--text': '#e6ffb8', '--dim': '#5c7a2e',
+      '--cyan-rgb': '186, 255, 41', '--mag-rgb': '107, 255, 94', '--amber-rgb': '242, 255, 94'
+    },
+    vis: { c1: '#baff29', c2: '#9dff3a', c3: '#6bff5e', peak: '#f2ff5e', dim: '#5c7a2e' }
+  },
+  'DEEP SPACE': {
+    vars: {
+      '--void': '#030308', '--panel': '#08081a', '--panel2': '#0e0e28', '--inset': '#020207',
+      '--line': '#1c1c48', '--line2': '#28286a',
+      '--cyan': '#6a7aff', '--mag': '#9a6aff', '--amber': '#6ae0ff',
+      '--text': '#c8ccf5', '--dim': '#55558a',
+      '--cyan-rgb': '106, 122, 255', '--mag-rgb': '154, 106, 255', '--amber-rgb': '106, 224, 255'
+    },
+    vis: { c1: '#6a7aff', c2: '#8272ff', c3: '#9a6aff', peak: '#6ae0ff', dim: '#55558a' }
+  },
+  'MIAMI': {
+    vars: {
+      '--void': '#0a0518', '--panel': '#150a28', '--panel2': '#1c0f36', '--inset': '#070312',
+      '--line': '#3a1f5c', '--line2': '#4f2a7d',
+      '--cyan': '#2de6c8', '--mag': '#ff3fa4', '--amber': '#ffe14d',
+      '--text': '#ffe0f0', '--dim': '#7a5590',
+      '--cyan-rgb': '45, 230, 200', '--mag-rgb': '255, 63, 164', '--amber-rgb': '255, 225, 77'
+    },
+    vis: { c1: '#2de6c8', c2: '#ff6fc8', c3: '#ff3fa4', peak: '#ffe14d', dim: '#7a5590' }
+  },
+  'GOLD RUSH': {
+    vars: {
+      '--void': '#0d0800', '--panel': '#1a1000', '--panel2': '#241802', '--inset': '#080500',
+      '--line': '#5c3d0a', '--line2': '#7d5410',
+      '--cyan': '#ffcc33', '--mag': '#ffaa00', '--amber': '#fff0b0',
+      '--text': '#ffedc2', '--dim': '#8a6a30',
+      '--cyan-rgb': '255, 204, 51', '--mag-rgb': '255, 170, 0', '--amber-rgb': '255, 240, 176'
+    },
+    vis: { c1: '#ffcc33', c2: '#ffbb19', c3: '#ffaa00', peak: '#fff0b0', dim: '#8a6a30' }
+  },
+  'BLUE PHOSPHOR': {
+    vars: {
+      '--void': '#000208', '--panel': '#001428', '--panel2': '#001c38', '--inset': '#000104',
+      '--line': '#0a3a6a', '--line2': '#0e5090',
+      '--cyan': '#3fb4ff', '--mag': '#7ad4ff', '--amber': '#b8e8ff',
+      '--text': '#cfeeff', '--dim': '#2f6a99',
+      '--cyan-rgb': '63, 180, 255', '--mag-rgb': '122, 212, 255', '--amber-rgb': '184, 232, 255'
+    },
+    vis: { c1: '#3fb4ff', c2: '#5cc4ff', c3: '#7ad4ff', peak: '#b8e8ff', dim: '#2f6a99' }
+  },
+  'STEEL': {
+    vars: {
+      '--void': '#08090b', '--panel': '#101215', '--panel2': '#16191d', '--inset': '#050607',
+      '--line': '#33383e', '--line2': '#454c54',
+      '--cyan': '#d8dee6', '--mag': '#a8b2bd', '--amber': '#f2f5f8',
+      '--text': '#eef1f4', '--dim': '#6b727a',
+      '--cyan-rgb': '216, 222, 230', '--mag-rgb': '168, 178, 189', '--amber-rgb': '242, 245, 248'
+    },
+    vis: { c1: '#d8dee6', c2: '#c0c8d2', c3: '#a8b2bd', peak: '#f2f5f8', dim: '#6b727a' }
+  },
+  'TRON GRID': {
+    vars: {
+      '--void': '#000a12', '--panel': '#001824', '--panel2': '#002432', '--inset': '#00060a',
+      '--line': '#0a5a7a', '--line2': '#0e7ca3',
+      '--cyan': '#4de8ff', '--mag': '#8ff2ff', '--amber': '#ffffff',
+      '--text': '#d6f7ff', '--dim': '#2f7a99',
+      '--cyan-rgb': '77, 232, 255', '--mag-rgb': '143, 242, 255', '--amber-rgb': '255, 255, 255'
+    },
+    vis: { c1: '#4de8ff', c2: '#6eedff', c3: '#8ff2ff', peak: '#ffffff', dim: '#2f7a99' }
   }
 };
 const THEME_NAMES = Object.keys(THEMES);
