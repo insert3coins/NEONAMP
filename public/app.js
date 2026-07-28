@@ -2955,6 +2955,22 @@ function wsConnect() {
       toast('ACTIVE PLAYLIST WAS DELETED');
       return;
     }
+    // A !request got approved into the playlist we're currently on — tack
+    // it onto the live queue rather than making the streamer reload just
+    // to pick up one track. Additive only: never touches cur/sel, so
+    // whatever's playing right now isn't disturbed. Reject doesn't have an
+    // equivalent — pulling a track out from under an active queue is a
+    // riskier operation than appending one, and rejects should be rare
+    // enough on already-playing tracks that a manual reload is fine.
+    if (msg.cmd === 'playlist-append' && msg.name === currentName && msg.track) {
+      if (!pl.some((t) => t.storage === 'youtube' && t.videoId === msg.track.videoId)) {
+        pl.push(msg.track);
+        renderPlaylist();
+        scheduleSession();
+        toast(`REQUEST APPROVED — ADDED TO QUEUE: ${trackLabel(msg.track).toUpperCase()}`);
+      }
+      return;
+    }
     if (msg.cmd === 'next') doNext(false);
     else if (msg.cmd === 'prev') doPrev();
     else if (msg.cmd === 'pause') { if (audio.src && !audio.paused) audio.pause(); }

@@ -836,6 +836,65 @@ function duplicateTrackAt(index = selected) {
   toast('TRACK ENTRY DUPLICATED');
 }
 
+// Approve/reject hit the server immediately (like retryYoutubeDownload) —
+// unlike most track edits here, this isn't a local change queued behind
+// SAVE CHANGES, because approving spans two playlist files at once and
+// there's no "local" representation of that. The track is spliced out of
+// the in-memory list to match what the server just did, without touching
+// setDirty()/the dirty flag — that flag is for the OTHER, unrelated local
+// edits a streamer might have pending, and this shouldn't interact with it.
+function approveRequestDialog(index = selected) {
+  const track = tracks[index];
+  if (!track || !track.requestedBy) return;
+  const body = openModal('APPROVE REQUEST', `
+    <div class="microcopy" id="approveInfo"></div>
+    <div class="formgrid">
+      <label class="field full">MOVE TO PLAYLIST<input id="approveTarget" list="approveTargetList" maxlength="64" autocomplete="off" placeholder="Type an existing or new playlist name"></label>
+      <datalist id="approveTargetList"></datalist>
+    </div>
+    <div class="modalactions"><button class="button primary" id="doApprove">APPROVE + MOVE</button></div>`);
+  body.querySelector('#approveInfo').textContent = `"${track.title || 'Untitled'}" — requested by ${track.requestedBy}`;
+  const datalist = body.querySelector('#approveTargetList');
+  for (const p of playlists) {
+    if (p.name === currentName) continue;
+    const opt = document.createElement('option');
+    opt.value = p.name;
+    datalist.appendChild(opt);
+  }
+  const input = body.querySelector('#approveTarget');
+  const submit = async () => {
+    const target = input.value.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$/.test(target)) { toast('INVALID PLAYLIST NAME', true); return; }
+    if (target.toLowerCase() === currentName.toLowerCase()) { toast('PICK A DIFFERENT PLAYLIST', true); return; }
+    try {
+      await api(`/api/playlists/${encodeURIComponent(currentName)}/requests/${encodeURIComponent(track.videoId)}/approve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target })
+      });
+      closeModal();
+      tracks.splice(index, 1);
+      selected = Math.min(index, tracks.length - 1);
+      renderTracks();
+      await refreshPlaylists();
+      toast(`APPROVED — MOVED TO "${target.toUpperCase()}"`);
+    } catch (error) { toast('APPROVE FAILED: ' + error.message, true); }
+  };
+  body.querySelector('#doApprove').addEventListener('click', submit);
+  input.addEventListener('keydown', (event) => { if (event.key === 'Enter') submit(); });
+  input.focus();
+}
+
+async function rejectRequestAt(index = selected) {
+  const track = tracks[index];
+  if (!track || !track.requestedBy) return;
+  try {
+    await api(`/api/playlists/${encodeURIComponent(currentName)}/requests/${encodeURIComponent(track.videoId)}/reject`, { method: 'POST' });
+    tracks.splice(index, 1);
+    selected = Math.min(index, tracks.length - 1);
+    renderTracks();
+    toast('REQUEST REJECTED');
+  } catch (error) { toast('REJECT FAILED: ' + error.message, true); }
+}
+
 function readArtwork(file) {
   return new Promise((resolve, reject) => {
     if (!file) return resolve(undefined);
@@ -1053,6 +1112,11 @@ function showTrackContext(event, index) {
     ] : [
       { icon: '✎', label: 'Edit metadata + artwork', action: () => metadataDialog() }
     ]),
+    ...(track.requestedBy ? [
+      null,
+      { icon: '✓', label: 'Approve request…', hint: 'MOVE TO…', action: () => approveRequestDialog(index) },
+      { icon: '✕', label: 'Reject request', danger: true, action: () => rejectRequestAt(index) }
+    ] : []),
     null,
     { icon: '↑', label: 'Move up', disabled: index <= 0, action: () => moveTrack(index, index - 1) },
     { icon: '↓', label: 'Move down', disabled: index >= tracks.length - 1, action: () => moveTrack(index, index + 1) },

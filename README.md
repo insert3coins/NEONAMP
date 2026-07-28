@@ -469,6 +469,20 @@ cooldown window (default 5 min). Capped at 40 pending requests at
 once — past that it tells the requester to wait for the streamer to
 clear some space, rather than growing forever.
 
+Right-click a requested track for **Approve request…** or **Reject
+request**. Approve asks which playlist to move it into (existing or
+brand new — it's created on the spot if it doesn't exist yet) and
+replies in chat: *"your request was approved and added to
+&lt;playlist&gt;!"*. Reject just removes it and replies that it didn't
+make the cut. Both are immediate — no need to hit SAVE CHANGES — since
+approving spans two playlist files at once.
+
+If the playlist you approve a request into happens to be the one
+actively loaded on the deck right now, the new track is pushed onto
+the live queue immediately — no reload needed, and whatever's
+currently playing is undisturbed. Rejecting has no equivalent live
+effect either way, matching how it already behaves.
+
 The message template supports `{title}` `{artist}` `{artistUrl}`
 `{album}` `{year}` `{file}` `{idx}` `{count}`. `{artistUrl}` is read
 from the audio file's own tags — artist website commons, ID3 `WOAR`,

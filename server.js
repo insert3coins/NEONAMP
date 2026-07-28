@@ -1970,6 +1970,76 @@ async function addYoutubeRequest(playlistName, url, requestedBy) {
   return { ok: true, title: stubs[0].title, artist: stubs[0].artist };
 }
 
+// Approve/reject act directly on the playlist files (not through
+// writeOwnedPlaylist/materializePlaylist — those are for owned/copied
+// media, but a request track is a youtube-storage entry shared out of
+// ./youtube-cache like any other, so a plain read-splice-write is all
+// moving or dropping one needs).
+app.post('/api/playlists/:name/requests/:videoId/approve', async (req, res) => {
+  const name = safeName(req.params.name);
+  const videoId = safeVideoId(req.params.videoId);
+  const target = safeName(req.body?.target);
+  if (!name || !videoId || !target) return res.status(400).json({ error: 'Invalid playlist, video, or target name' });
+  if (target === name) return res.status(400).json({ error: 'Target playlist must be different from the source' });
+
+  const sourceFile = path.join(PLAYLIST_DIR, `${name}.json`);
+  let sourceData;
+  try { sourceData = JSON.parse(await fs.readFile(sourceFile, 'utf8')); }
+  catch { return res.status(404).json({ error: 'Playlist not found' }); }
+  const sourceTracks = Array.isArray(sourceData.tracks) ? sourceData.tracks : [];
+  const trackIndex = sourceTracks.findIndex((t) => t?.storage === 'youtube' && t.videoId === videoId);
+  if (trackIndex < 0) return res.status(404).json({ error: 'Track not found in that playlist' });
+  const [track] = sourceTracks.splice(trackIndex, 1);
+
+  const targetFile = path.join(PLAYLIST_DIR, `${target}.json`);
+  const targetData = await readJsonFile(targetFile, null)
+    || { version: 2, name: target, saved: new Date().toISOString(), tracks: [] };
+  const targetTracks = Array.isArray(targetData.tracks) ? targetData.tracks : [];
+  const alreadyThere = targetTracks.some((t) => t?.storage === 'youtube' && t.videoId === videoId);
+  if (!alreadyThere) targetTracks.push(track);
+
+  await writeJsonFile(sourceFile, { ...sourceData, version: 2, name, saved: new Date().toISOString(), tracks: sourceTracks });
+  await writeJsonFile(targetFile, { ...targetData, version: 2, name: target, saved: new Date().toISOString(), tracks: targetTracks });
+
+  // Whoever has `target` as their active queue right now (deck or jukebox)
+  // picks this up live — see app.js's 'playlist-append' handler. Broadcast
+  // unconditionally and let each client self-filter on name, same as
+  // rename-playlist/clear-playlist above; nothing to do if no one has it
+  // loaded, the message is just ignored.
+  if (!alreadyThere) broadcastCmd('playlist-append', { name: target, track });
+
+  let sent = false;
+  if (track.requestedBy) {
+    try { await sendChat(`@${track.requestedBy} your request "${track.title}" was approved and added to ${target}!`); sent = true; }
+    catch { /* best effort */ }
+  }
+  res.json({ ok: true, moved: !alreadyThere, sent });
+});
+
+app.post('/api/playlists/:name/requests/:videoId/reject', async (req, res) => {
+  const name = safeName(req.params.name);
+  const videoId = safeVideoId(req.params.videoId);
+  if (!name || !videoId) return res.status(400).json({ error: 'Invalid playlist or video' });
+
+  const sourceFile = path.join(PLAYLIST_DIR, `${name}.json`);
+  let sourceData;
+  try { sourceData = JSON.parse(await fs.readFile(sourceFile, 'utf8')); }
+  catch { return res.status(404).json({ error: 'Playlist not found' }); }
+  const sourceTracks = Array.isArray(sourceData.tracks) ? sourceData.tracks : [];
+  const trackIndex = sourceTracks.findIndex((t) => t?.storage === 'youtube' && t.videoId === videoId);
+  if (trackIndex < 0) return res.status(404).json({ error: 'Track not found in that playlist' });
+  const [track] = sourceTracks.splice(trackIndex, 1);
+
+  await writeJsonFile(sourceFile, { ...sourceData, version: 2, name, saved: new Date().toISOString(), tracks: sourceTracks });
+
+  let sent = false;
+  if (track.requestedBy) {
+    try { await sendChat(`@${track.requestedBy} sorry, your request "${track.title}" wasn't added this time.`); sent = true; }
+    catch { /* best effort */ }
+  }
+  res.json({ ok: true, sent });
+});
+
 // A single video downloads inline so it is instantly playable; a playlist
 // URL is resolved (fast — no audio fetched yet) and its videos queued for
 // background download, one at a time, with progress over /ws.
