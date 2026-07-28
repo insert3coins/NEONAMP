@@ -29,6 +29,7 @@
 # Queue, track position, volume, EQ curve — rewritten every few seconds.
 /settings.json
 /loudness-cache.json
+/play-counts.json
 
 # ── bundled ffmpeg ────────────────────────────────────────────────────
 # ~100 MB each: over GitHub's hard per-file limit. Install ffmpeg on PATH

@@ -32,7 +32,7 @@ const DSP_PRESETS = {
 
 const els = {
   connection: $('#connection'), playlistList: $('#playlistList'), playlistCount: $('#playlistCount'),
-  playlistFilter: $('#playlistFilter'), refreshPlaylists: $('#refreshPlaylists'), newPlaylist: $('#newPlaylist'),
+  playlistFilter: $('#playlistFilter'), refreshPlaylists: $('#refreshPlaylists'), newPlaylist: $('#newPlaylist'), searchLibrary: $('#searchLibrary'),
   activeName: $('#activeName'), dirty: $('#dirty'), trackCount: $('#trackCount'), totalTime: $('#totalTime'),
   trackList: $('#trackList'), emptyState: $('#emptyState'), loadPlay: $('#loadPlay'), saveChanges: $('#saveChanges'),
   ytProgress: $('#ytProgress'),
@@ -88,9 +88,17 @@ function trackLabel(track) {
   return track?.artist ? `${track.artist} — ${track.title || 'Unknown'}` : (track?.title || 'Unknown track');
 }
 
+// Must match server.js's trackRef().key exactly, storage by storage — see
+// the same function in app.js for why (loudness /ws pushes compare against
+// this; a mismatched scheme means live gain updates silently never apply).
 function trackKey(track) {
   if (!track) return '';
-  return track.trackKey || `${track.storage || 'playlist'}:${track.playlist || ''}:${track.file || ''}`;
+  if (track.trackKey) return track.trackKey;
+  if (track.storage === 'path') return `path:${track.sourceId || ''}`;
+  if (track.storage === 'youtube') return `youtube:${track.file || ''}`;
+  if (track.storage === 'playlist' && track.playlist) return `playlist:${track.playlist}:${track.file || ''}`;
+  if (track.storage === 'radio') return `radio:${track.stationId || track.file || ''}`;
+  return track.file || '';
 }
 
 function mediaApiUrl(endpoint, track) {
@@ -361,6 +369,107 @@ async function savePlaylist(quiet = false) {
     toast('SAVE FAILED: ' + error.message, true);
     return false;
   }
+}
+
+let searchDebounce = null;
+
+function fmtAgo(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 90) return 'JUST NOW';
+  const m = s / 60;
+  if (m < 90) return `${Math.round(m)}M AGO`;
+  const h = m / 60;
+  if (h < 36) return `${Math.round(h)}H AGO`;
+  const d = h / 24;
+  if (d < 45) return `${Math.round(d)}D AGO`;
+  return `${Math.round(d / 30)}MO AGO`;
+}
+
+function searchLibraryDialog() {
+  const body = openModal('SEARCH ALL PLAYLISTS', `
+    <div class="searchtabs">
+      <button class="searchtab active" data-tab="search">SEARCH</button>
+      <button class="searchtab" data-tab="recent">RECENTLY ADDED</button>
+      <button class="searchtab" data-tab="played">MOST PLAYED</button>
+    </div>
+    <label class="field full" id="searchQueryField">TITLE, ARTIST, OR ALBUM<input id="searchQuery" type="search" placeholder="Start typing…" autocomplete="off"></label>
+    <div class="searchresults" id="searchResults"><div class="searchempty">TYPE AT LEAST 2 CHARACTERS</div></div>`);
+  const input = body.querySelector('#searchQuery');
+  const queryField = body.querySelector('#searchQueryField');
+  const resultsEl = body.querySelector('#searchResults');
+  const tabs = [...body.querySelectorAll('.searchtab')];
+  let mode = 'search';
+  const runSearch = async () => {
+    const q = input.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = '<div class="searchempty">TYPE AT LEAST 2 CHARACTERS</div>'; return; }
+    resultsEl.innerHTML = '<div class="searchempty">SEARCHING…</div>';
+    try {
+      const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      renderSearchResults(resultsEl, data.results || [], 'search');
+    } catch (error) {
+      resultsEl.innerHTML = `<div class="searchempty">SEARCH FAILED: ${error.message}</div>`;
+    }
+  };
+  const runSmart = async (which) => {
+    resultsEl.innerHTML = '<div class="searchempty">LOADING…</div>';
+    try {
+      const data = await api(`/api/smart/${which}?limit=100`);
+      renderSearchResults(resultsEl, data.results || [], which);
+    } catch (error) {
+      resultsEl.innerHTML = `<div class="searchempty">LOAD FAILED: ${error.message}</div>`;
+    }
+  };
+  const activateTab = (which) => {
+    mode = which;
+    for (const tab of tabs) tab.classList.toggle('active', tab.dataset.tab === which);
+    if (which === 'search') {
+      queryField.style.display = '';
+      input.focus();
+      if (input.value.trim().length >= 2) runSearch();
+      else resultsEl.innerHTML = '<div class="searchempty">TYPE AT LEAST 2 CHARACTERS</div>';
+    } else {
+      queryField.style.display = 'none';
+      runSmart(which);
+    }
+  };
+  for (const tab of tabs) tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+  input.addEventListener('input', () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(runSearch, 250);
+  });
+  input.focus();
+}
+
+function renderSearchResults(container, results, mode = 'search') {
+  if (!results.length) { container.innerHTML = '<div class="searchempty">NO MATCHES</div>'; return; }
+  container.innerHTML = '';
+  for (const r of results) {
+    const row = document.createElement('div');
+    row.className = 'searchrow';
+    row.title = 'Double-click to load this playlist and play this track';
+    row.innerHTML = `
+      <span class="srtitle"></span>
+      <span class="srartist"></span>
+      <span class="srplaylist"></span>
+      <span class="srdur"></span>`;
+    row.querySelector('.srtitle').textContent = r.title || 'Unknown track';
+    row.querySelector('.srartist').textContent = r.artist || '';
+    row.querySelector('.srplaylist').textContent = r.playlist;
+    const durEl = row.querySelector('.srdur');
+    durEl.textContent = mode === 'recent' ? fmtAgo(r.addedAt)
+      : mode === 'played' ? `${r.count}×`
+      : r.storage === 'radio' ? 'LIVE' : fmtTime(r.duration);
+    row.addEventListener('dblclick', () => activateSearchResult(r));
+    container.appendChild(row);
+  }
+}
+
+async function activateSearchResult(result) {
+  closeModal();
+  try {
+    if (currentName !== result.playlist) await loadPlaylist(result.playlist, true);
+    await activateTrack(result.index);
+  } catch (error) { toast('PLAY FAILED: ' + error.message, true); }
 }
 
 function newPlaylistDialog() {
@@ -1358,6 +1467,7 @@ els.trackTable.addEventListener('contextmenu', (event) => {
   showPlaylistSpaceContext(event);
 });
 els.newPlaylist.addEventListener('click', newPlaylistDialog);
+els.searchLibrary.addEventListener('click', searchLibraryDialog);
 els.saveChanges.addEventListener('click', () => savePlaylist());
 els.deletePlaylist.addEventListener('click', deleteCurrentPlaylist);
 els.loadPlay.addEventListener('click', () => activateTrack(selected >= 0 ? selected : 0));
@@ -1384,6 +1494,10 @@ document.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();
     savePlaylist();
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    searchLibraryDialog();
   }
   if (event.key === 'Delete' && !event.target.matches('input')) els.removeTrack.click();
 });

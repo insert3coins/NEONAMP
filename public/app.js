@@ -270,9 +270,21 @@ window.addEventListener('scroll', closeDeckContextMenu);
 function trackLabel(t) {
   return t.artist ? `${t.artist} - ${t.title}` : t.title;
 }
+// Must match server.js's trackRef().key exactly, storage by storage — this
+// is what a /ws {type:'loudness'} push's trackKey is compared against to
+// apply a just-finished analysis to the track currently playing. Getting
+// the scheme wrong here means live gain updates from analyzeLoudness()
+// silently never match: a first-time play of a fresh track sits at unity
+// gain for that session (only correct on the *next* play, once cached),
+// while everything already-cached normalizes as expected — "some tracks
+// play louder than others" with no apparent pattern.
 function trackKey(t) {
   if (!t) return '';
-  return `${t.storage || 'library'}:${t.playlist || ''}:${t.file || ''}`;
+  if (t.storage === 'path') return `path:${t.sourceId || ''}`;
+  if (t.storage === 'youtube') return `youtube:${t.file || ''}`;
+  if (t.storage === 'playlist' && t.playlist) return `playlist:${t.playlist}:${t.file || ''}`;
+  if (t.storage === 'radio') return `radio:${t.stationId || t.file || ''}`;
+  return t.file || ''; // library — server's key is the bare relative path
 }
 function encodedTrackPath(file) {
   return String(file || '').split('/').map(encodeURIComponent).join('/');

@@ -234,6 +234,30 @@ install yt-dlp` or see
 [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp)); without
 it, adding audio fails with a clear error.
 
+## Library-wide search & smart playlists
+
+The ⌕ button beside PLAYLISTS on `/playlist` (or `Ctrl+K`) opens a search
+across every saved playlist's title/artist/album at once — the sidebar
+filter next to it only matches playlist *names*, not what's inside them.
+Results show which playlist each match lives in; double-click one to load
+that playlist and start playing it immediately, no need to hunt through
+playlists by hand to find a track you know you added somewhere.
+
+The same dialog has two more tabs alongside SEARCH:
+
+- **RECENTLY ADDED** — every track, across every playlist, sorted by when
+  it was added, newest first. Tracks added before this feature shipped
+  have no timestamp and won't appear here; everything added from now on
+  will.
+- **MOST PLAYED** — tracks sorted by play count. A play counts once a
+  track has been listened to past half its duration (capped between 10s
+  and 30s), tallied from the same playback-state stream the deck/jukebox
+  already send over `/ws` — nothing extra to configure. Internet radio
+  stations aren't counted (a live stream has no meaningful "play").
+
+Play counts persist to `play-counts.json`, saved on the same debounced
+schedule as the loudness cache.
+
 ## Playlist utilities
 
 The playlist **UTIL** menu can randomize or reverse the queue, remove
@@ -463,6 +487,9 @@ collapse their panels just like the original.
 - `PUT/DELETE /api/radio/:id` — edit or remove a station
 - `GET /api/radio/:id/stream|status` — proxied audio and live ICY status
 - `GET  /api/playlists` — list saved playlists
+- `GET  /api/search?q=...` — title/artist/album search across every saved playlist
+- `GET  /api/smart/recent?limit=...` — most recently added tracks across every playlist
+- `GET  /api/smart/played?limit=...` — most played tracks across every playlist
 - `GET  /api/playlists/:name` — fetch one
 - `PUT  /api/playlists/:name` — save `{ "tracks": [...] }` without copying filepath sources
 - `POST /api/files/pick` — open the server computer's native audio-file picker

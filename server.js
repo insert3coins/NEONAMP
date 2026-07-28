@@ -1131,6 +1131,47 @@ setInterval(() => {
 
 function loudKey(st) { return `${st.mtimeMs}:${st.size}`; }
 
+// ------------------------------------------------------------
+// Play-count tracking — "most played" smart view. Counted from
+// the same {type:'state'} stream the deck/jukebox already push
+// over /ws (see persistJukePosition above); no separate report
+// call from the client. A track counts once per listening
+// session once playback crosses half its duration (10-30s).
+// ------------------------------------------------------------
+const PLAY_COUNTS_FILE = path.join(__dirname, 'play-counts.json');
+let playCounts = new Map();
+let playCountsDirty = false;
+const playCountProgress = new Map(); // src -> { key, counted }
+
+async function loadPlayCounts() {
+  const raw = await readJsonFile(PLAY_COUNTS_FILE, {});
+  playCounts = new Map(Object.entries(raw).filter(([, v]) => Number(v) > 0));
+}
+setInterval(() => {
+  if (!playCountsDirty) return;
+  playCountsDirty = false;
+  writeJsonFile(PLAY_COUNTS_FILE, Object.fromEntries(playCounts)).catch(() => {});
+}, 3000);
+
+function maybeCountPlay(s) {
+  try {
+    if (!s || s.status !== 'playing' || s.storage === 'radio') return;
+    const key = s.trackKey || '';
+    if (!key) return;
+    let entry = playCountProgress.get(s.src);
+    if (!entry || entry.key !== key) {
+      entry = { key, counted: false };
+      playCountProgress.set(s.src, entry);
+    }
+    if (entry.counted) return;
+    const threshold = Math.max(10, Math.min(30, (Number(s.duration) || 0) * 0.5));
+    if (Number(s.t) < threshold) return;
+    entry.counted = true;
+    playCounts.set(key, (playCounts.get(key) || 0) + 1);
+    playCountsDirty = true;
+  } catch { /* never break playback */ }
+}
+
 function gainFromLufs(lufs) {
   if (typeof lufs !== 'number' || !isFinite(lufs)) return null;
   const g = LOUDNESS_TARGET - lufs;
@@ -1323,7 +1364,8 @@ async function writeOwnedPlaylist(name, inputTracks) {
         title: String(input.title || 'Internet Radio'), artist: String(input.artist || 'INTERNET RADIO'),
         album: String(input.album || ''), genre: String(input.genre || ''),
         homepage: safeStationUrl(input.homepage) || '', duration: 0,
-        bitrate: Number(input.bitrate) || 0, sampleRate: 0, channels: 2
+        bitrate: Number(input.bitrate) || 0, sampleRate: 0, channels: 2,
+        addedAt: input.addedAt || Date.now()
       });
       continue;
     }
@@ -1346,7 +1388,8 @@ async function writeOwnedPlaylist(name, inputTracks) {
         album: String(input.album || '').slice(0, 300), genre: String(input.genre || '').slice(0, 300),
         year: String(input.year || '').slice(0, 16),
         duration: Math.max(0, Math.round(Number(input.duration)) || 0),
-        bitrate: Number(input.bitrate) || 0, sampleRate: Number(input.sampleRate) || 0, channels: Number(input.channels) || 2
+        bitrate: Number(input.bitrate) || 0, sampleRate: Number(input.sampleRate) || 0, channels: Number(input.channels) || 2,
+        addedAt: input.addedAt || Date.now()
       });
       continue;
     }
@@ -1421,7 +1464,8 @@ async function materializePlaylist(name, inputTracks, saved = new Date().toISOSt
           artist: String(input.artist || 'INTERNET RADIO'),
           album: String(input.album || ''), genre: String(input.genre || ''),
           homepage: safeStationUrl(input.homepage) || '', duration: 0,
-          bitrate: Number(input.bitrate) || 0, sampleRate: 0, channels: 2
+          bitrate: Number(input.bitrate) || 0, sampleRate: 0, channels: 2,
+          addedAt: input.addedAt || Date.now()
         });
         continue;
       }
@@ -1444,7 +1488,8 @@ async function materializePlaylist(name, inputTracks, saved = new Date().toISOSt
           album: String(input.album || '').slice(0, 300), genre: String(input.genre || '').slice(0, 300),
           year: String(input.year || '').slice(0, 16),
           duration: Math.max(0, Math.round(Number(input.duration)) || 0),
-          bitrate: Number(input.bitrate) || 0, sampleRate: Number(input.sampleRate) || 0, channels: Number(input.channels) || 2
+          bitrate: Number(input.bitrate) || 0, sampleRate: Number(input.sampleRate) || 0, channels: Number(input.channels) || 2,
+          addedAt: input.addedAt || Date.now()
         });
         continue;
       }
@@ -1520,6 +1565,7 @@ async function migrateLegacyPlaylists() {
 }
 
 await migrateLegacyPlaylists();
+await loadPlayCounts();
 
 app.get('/api/playlists', async (req, res) => {
   try {
@@ -1546,6 +1592,82 @@ app.get('/api/playlists', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Shared by /api/search and the smart-playlist endpoints below — reads every
+// saved playlist JSON fresh on every call (no database) and runs tracks
+// through exposedPlaylist() so `storage` is properly annotated (owned media
+// resolves to 'playlist', matching what the client/trackRef() expect) rather
+// than whatever raw, possibly-absent value sits in the file on disk.
+async function scanAllTracks() {
+  let files = [];
+  try { files = (await fs.readdir(PLAYLIST_DIR)).filter((f) => f.endsWith('.json') && !f.startsWith('_')); }
+  catch { return []; }
+  const all = [];
+  for (const file of files) {
+    const name = safeName(file.replace(/\.json$/i, ''));
+    if (!name) continue;
+    let data;
+    try { data = JSON.parse(await fs.readFile(path.join(PLAYLIST_DIR, file), 'utf8')); } catch { continue; }
+    const { tracks } = exposedPlaylist(data, name);
+    for (let index = 0; index < tracks.length; index++) {
+      all.push({ playlist: name, index, track: tracks[index] });
+    }
+  }
+  return all;
+}
+
+app.get('/api/search', async (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  if (q.length < 2) return res.json({ results: [] });
+  const all = await scanAllTracks();
+  const results = [];
+  for (const e of all) {
+    const t = e.track;
+    const haystack = `${t?.title || ''} ${t?.artist || ''} ${t?.album || ''}`.toLowerCase();
+    if (!haystack.includes(q)) continue;
+    results.push({
+      playlist: e.playlist, index: e.index,
+      title: t?.title || '', artist: t?.artist || '', album: t?.album || '',
+      duration: Number(t?.duration) || 0, storage: t?.storage || 'library'
+    });
+    if (results.length >= 500) break;
+  }
+  results.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+  res.json({ results: results.slice(0, 200) });
+});
+
+app.get('/api/smart/recent', async (req, res) => {
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+  const all = await scanAllTracks();
+  const results = all
+    .filter((e) => Number(e.track?.addedAt) > 0)
+    .sort((a, b) => Number(b.track.addedAt) - Number(a.track.addedAt))
+    .slice(0, limit)
+    .map((e) => ({
+      playlist: e.playlist, index: e.index,
+      title: e.track?.title || '', artist: e.track?.artist || '', album: e.track?.album || '',
+      duration: Number(e.track?.duration) || 0, storage: e.track?.storage || 'library',
+      addedAt: Number(e.track.addedAt)
+    }));
+  res.json({ results });
+});
+
+app.get('/api/smart/played', async (req, res) => {
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+  const all = await scanAllTracks();
+  const results = all
+    .map((e) => ({ ...e, count: playCounts.get(trackRef(e.track)?.key || '') || 0 }))
+    .filter((e) => e.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit)
+    .map((e) => ({
+      playlist: e.playlist, index: e.index,
+      title: e.track?.title || '', artist: e.track?.artist || '', album: e.track?.album || '',
+      duration: Number(e.track?.duration) || 0, storage: e.track?.storage || 'library',
+      count: e.count
+    }));
+  res.json({ results });
 });
 
 app.get('/api/playlists/:name', async (req, res) => {
@@ -1637,7 +1759,7 @@ app.post('/api/playlists/:name/paths', async (req, res) => {
       const info = await trackInfo(full, path.basename(full));
       const track = {
         ...info, storage: 'path', file: registered.full, sourceId: registered.sourceId,
-        originalFile: registered.full
+        originalFile: registered.full, addedAt: Date.now()
       };
       existing.push(track);
       added.push(filepathTrack(track));
@@ -1670,7 +1792,7 @@ function buildYoutubeStubs(rawEntries, info, isPlaylist, existingIds) {
       artist: String(e.uploader || e.channel || info.uploader || info.channel || 'Unknown').trim().slice(0, 300),
       album: playlistTitle, genre: '', year: '',
       duration: Math.max(0, Math.round(Number(e.duration)) || 0),
-      bitrate: 0, sampleRate: 0, channels: 2
+      bitrate: 0, sampleRate: 0, channels: 2, addedAt: Date.now()
     });
   }
   return stubs;
@@ -1869,7 +1991,7 @@ app.put('/api/playlists/:name/upload', async (req, res) => {
     if (!bytes) return fail(400, 'Empty upload');
     try {
       const info = await trackInfo(dest, rel);
-      const rawTrack = { ...info, originalFile: uploadName };
+      const rawTrack = { ...info, originalFile: uploadName, addedAt: Date.now() };
       data = { ...data, version: 2, name: playlist, saved: new Date().toISOString() };
       data.tracks = Array.isArray(data.tracks) ? data.tracks : [];
       data.tracks.push(rawTrack);
@@ -2818,6 +2940,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     try {
       if (loudDirty && loudCache) await writeJsonFile(LOUDNESS_CACHE_FILE, loudCache);
+      if (playCountsDirty) await writeJsonFile(PLAY_COUNTS_FILE, Object.fromEntries(playCounts));
     } catch { /* best effort */ }
     process.exit(0);
   });
@@ -2844,7 +2967,7 @@ wss.on('connection', (sock) => {
   sock.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
-    if (msg.type === 'state') { lastState = msg; maybeAnnounceTrack(msg); persistJukePosition(msg); }
+    if (msg.type === 'state') { lastState = msg; maybeAnnounceTrack(msg); persistJukePosition(msg); maybeCountPlay(msg); }
     else if (msg.type === 'theme') { lastTheme = msg; }
     else if (msg.type === 'prefs') { lastPrefs = msg; }
     else if (msg.type !== 'fft') return;

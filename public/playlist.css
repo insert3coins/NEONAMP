@@ -193,6 +193,20 @@ button, a, select { -webkit-tap-highlight-color: transparent; }
 .field textarea { resize: vertical; min-height: 130px; line-height: 1.55; }
 .field input:focus, .field textarea:focus { border-color: var(--cyan); }
 .modalactions { display: flex; gap: 7px; justify-content: flex-end; margin-top: 13px; }
+.searchtabs { display: flex; gap: 6px; margin-top: 10px; }
+.searchtab { flex: 1; padding: 7px 4px; background: transparent; border: 1px solid var(--line); color: var(--dim); font: 9px 'Share Tech Mono', monospace; letter-spacing: .8px; text-transform: uppercase; cursor: pointer; }
+.searchtab:hover { color: var(--cyan); border-color: var(--cyan); }
+.searchtab.active { color: var(--cyan); border-color: var(--cyan); background: rgba(33,230,193,.055); }
+.searchresults { margin-top: 12px; max-height: 50vh; overflow-y: auto; border: 1px solid var(--line); background: var(--inset); }
+.searchrow { display: grid; grid-template-columns: minmax(0,2fr) minmax(0,1.3fr) minmax(0,1fr) 50px; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid rgba(43,35,80,.52); cursor: pointer; }
+.searchrow:last-child { border-bottom: none; }
+.searchrow:hover { background: rgba(255,255,255,.035); }
+.srtitle, .srartist, .srplaylist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srtitle { font-size: 11px; }
+.srartist { color: var(--dim); font-size: 9px; }
+.srplaylist { color: var(--cyan); font-size: 8px; letter-spacing: .6px; text-transform: uppercase; }
+.srdur { font-family: 'Share Tech Mono', monospace; color: var(--dim); font-size: 9px; text-align: right; }
+.searchempty { padding: 16px; text-align: center; color: var(--dim); font-size: 9px; letter-spacing: .8px; }
 .artedit { display: grid; grid-template-columns: 120px 1fr; gap: 13px; margin-bottom: 13px; }
 .artedit img { width: 120px; height: 120px; object-fit: cover; border: 1px solid var(--line); background: var(--inset); }
 .artbuttons { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 7px; }

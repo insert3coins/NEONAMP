@@ -487,9 +487,17 @@ let waterfallRows = [], waterfallAt = 0, particles = [], vuLevel = 0, vuPeak = 0
 // ── art ─────────────────────────────────────────────────
 artEl.addEventListener('load', () => artEl.classList.remove('hidden'));
 artEl.addEventListener('error', () => artEl.classList.add('hidden'));
+// Must match server.js's trackRef().key exactly, storage by storage — see
+// the same function in app.js for why (loudness /ws pushes compare against
+// this; a mismatched scheme means live gain updates silently never apply).
 function trackKey(t) {
   if (!t) return '';
-  return t.trackKey || `${t.storage || 'library'}:${t.playlist || ''}:${t.file || ''}`;
+  if (t.trackKey) return t.trackKey;
+  if (t.storage === 'path') return `path:${t.sourceId || ''}`;
+  if (t.storage === 'youtube') return `youtube:${t.file || ''}`;
+  if (t.storage === 'playlist' && t.playlist) return `playlist:${t.playlist}:${t.file || ''}`;
+  if (t.storage === 'radio') return `radio:${t.stationId || t.file || ''}`;
+  return t.file || '';
 }
 function mediaApiUrl(endpoint, t) {
   const q = new URLSearchParams({
