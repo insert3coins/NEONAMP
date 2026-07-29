@@ -89,9 +89,12 @@ is remote-controllable from `/playlist`.
 ## Waveform seek bar
 
 The strip above the seek slider is a real ffmpeg amplitude analysis
-(~400 peak buckets, cached, pushed live over `/ws`), not decoration.
-Click/drag it to seek. Radio has none; a pending analysis just leaves
-it blank.
+(~400 peak buckets, persisted per source track in `waveform-cache.json`
+and pushed live over `/ws`), not decoration. The next few queue tracks
+are warmed in the background; the same path or imported track reuses its
+cache across playlists, while playlist-owned media stays playlist-scoped.
+Click/drag it to seek. Radio has none; a pending analysis just leaves it
+blank until the background job completes.
 
 ## Sleep timer
 

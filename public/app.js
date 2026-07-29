@@ -1145,6 +1145,13 @@ let waveformPeaks = null;
 let waveformState = 'idle'; // 'idle' | 'pending' | 'ready' | 'unavailable'
 let seekWaveW = 0, seekWaveH = 0;
 const waveformCache = new Map(); // trackKey -> peaks array
+const waveformPrefetching = new Set();
+let waveformLoadVersion = 0;
+let waveformPollTimer = null;
+
+function validWaveformPeaks(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((v) => Number.isFinite(v));
+}
 
 function sizeSeekWave() {
   if (!els.seekWave) return;
@@ -1166,13 +1173,17 @@ function drawSeekWaveform() {
   const d = audio.duration;
   const frac = (!seeking && isFinite(d) && d > 0) ? (audio.currentTime / d) : (Number(els.seek.value) / 1000);
   const n = waveformPeaks.length;
-  const gap = 1;
-  const bw = Math.max(1, (seekWaveW - gap * (n - 1)) / n);
+  // Keep all buckets inside the canvas. With 400 buckets on the normal
+  // 440px deck, forcing both a 1px bar and a 1px gap made the waveform
+  // nearly 800px wide and silently clipped its second half.
+  const slot = seekWaveW / n;
+  const gap = Math.min(1, slot * 0.3);
+  const bw = Math.max(0.5, slot - gap);
   const mid = seekWaveH / 2;
   for (let i = 0; i < n; i++) {
     const v = Math.max(0.03, waveformPeaks[i]);
     const h = Math.max(1, v * (seekWaveH - 4));
-    const x = i * (bw + gap);
+    const x = i * slot;
     const played = i / n <= frac;
     g.fillStyle = played ? VIS_COLORS.c1 : VIS_COLORS.dim;
     g.globalAlpha = played ? 0.95 : 0.4;
@@ -1181,25 +1192,88 @@ function drawSeekWaveform() {
   g.globalAlpha = 1;
 }
 
+function setWaveformReady(key, peaks) {
+  if (!validWaveformPeaks(peaks)) return false;
+  waveformCache.set(key, peaks);
+  waveformPeaks = peaks;
+  waveformState = 'ready';
+  clearTimeout(waveformPollTimer);
+  waveformPollTimer = null;
+  drawSeekWaveform();
+  return true;
+}
+
+function scheduleWaveformPoll(t, key, version, pollCount, errorCount) {
+  if (version !== waveformLoadVersion || cur < 0 || trackKey(pl[cur]) !== key || waveformCache.has(key)) return;
+  clearTimeout(waveformPollTimer);
+  waveformPollTimer = setTimeout(
+    () => requestWaveform(t, key, version, pollCount, errorCount),
+    Math.min(1000 + pollCount * 500, 5000)
+  );
+}
+
+async function requestWaveform(t, key, version, pollCount = 0, errorCount = 0) {
+  try {
+    const r = await api(mediaApiUrl('waveform', t));
+    if (version !== waveformLoadVersion || cur < 0 || trackKey(pl[cur]) !== key) return;
+    if (r.status === 'ready' && setWaveformReady(key, r.peaks)) return;
+    if (r.status === 'unavailable') {
+      waveformState = 'unavailable';
+      drawSeekWaveform();
+      return;
+    }
+    // A first-time analysis normally arrives over /ws. Polling as well
+    // closes the boot/reconnect race where ffmpeg finishes before the
+    // socket opens, which otherwise leaves this track blank forever.
+    scheduleWaveformPoll(t, key, version, pollCount + 1, 0);
+  } catch {
+    if (errorCount >= 3) {
+      if (version === waveformLoadVersion && cur >= 0 && trackKey(pl[cur]) === key) {
+        waveformState = 'unavailable';
+        drawSeekWaveform();
+      }
+      return;
+    }
+    scheduleWaveformPoll(t, key, version, pollCount + 1, errorCount + 1);
+  }
+}
+
+function prefetchWaveform(t) {
+  if (!t || t.storage === 'radio') return;
+  const key = trackKey(t);
+  if (!key || waveformCache.has(key) || waveformPrefetching.has(key)) return;
+  waveformPrefetching.add(key);
+  const separator = mediaApiUrl('waveform', t).includes('?') ? '&' : '?';
+  api(`${mediaApiUrl('waveform', t)}${separator}background=1`).then((r) => {
+    if (r.status === 'ready' && validWaveformPeaks(r.peaks)) waveformCache.set(key, r.peaks);
+  }).catch(() => {}).finally(() => waveformPrefetching.delete(key));
+}
+
+function prefetchUpcomingWaveforms(index) {
+  // A small look-ahead keeps normal playlist playback ready without
+  // launching hundreds of ffmpeg jobs when a large saved list is opened.
+  for (let offset = 1; offset <= 3; offset++) {
+    const t = pl[index + offset];
+    if (t) prefetchWaveform(t);
+  }
+}
+
 function loadWaveform(t) {
+  const version = ++waveformLoadVersion;
+  clearTimeout(waveformPollTimer);
+  waveformPollTimer = null;
   waveformPeaks = null;
   waveformState = 'idle';
+  drawSeekWaveform();
   if (!t || t.storage === 'radio') { waveformState = 'unavailable'; return; }
   const key = trackKey(t);
   const cached = waveformCache.get(key);
-  if (cached) { waveformPeaks = cached; waveformState = 'ready'; return; }
-  waveformState = 'pending';
-  api(mediaApiUrl('waveform', t)).then((r) => {
-    if (cur < 0 || trackKey(pl[cur]) !== key) return; // track changed before this resolved
-    if (r.status === 'ready' && Array.isArray(r.peaks)) {
-      waveformCache.set(key, r.peaks);
-      waveformPeaks = r.peaks;
-      waveformState = 'ready';
-    } else if (r.status === 'unavailable') {
-      waveformState = 'unavailable';
-    }
-    // 'pending' resolves via the /ws {type:'waveform'} push
-  }).catch(() => { waveformState = 'unavailable'; });
+  if (cached) setWaveformReady(key, cached);
+  else {
+    waveformState = 'pending';
+    requestWaveform(t, key, version);
+  }
+  prefetchUpcomingWaveforms(cur);
 }
 
 function seekWaveToClientX(clientX) {
@@ -2455,6 +2529,7 @@ async function restoreSession() {
     const t = pl[cur];
     audio.src = trackUrl(t);
     fetchNormGain(t);
+    loadWaveform(t);
     setMarquee(`${trackLabel(t)}  ::  NEONAMP`);
     updateMeta(t);
     document.title = `${trackLabel(t)} — NEONAMP`;
@@ -3052,10 +3127,13 @@ function wsConnect() {
       return;
     }
     if (msg.type === 'waveform') {
-      if (cur >= 0 && trackKey(pl[cur]) === msg.trackKey && Array.isArray(msg.peaks)) {
+      if (validWaveformPeaks(msg.peaks)) {
+        // Background analyses are useful even when their track is not
+        // current; retain them so the upcoming playlist transition is instant.
         waveformCache.set(msg.trackKey, msg.peaks);
-        waveformPeaks = msg.peaks;
-        waveformState = 'ready';
+        if (cur >= 0 && trackKey(pl[cur]) === msg.trackKey) {
+          setWaveformReady(msg.trackKey, msg.peaks);
+        }
       }
       return;
     }

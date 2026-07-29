@@ -1350,6 +1350,11 @@ async function loadWaveCache() {
   waveCache = await readJsonFile(WAVEFORM_CACHE_FILE, {});
   return waveCache;
 }
+
+function validWavePeaks(value) {
+  return Array.isArray(value) && value.length === WAVEFORM_BUCKETS &&
+    value.every((v) => typeof v === 'number' && Number.isFinite(v));
+}
 setInterval(() => {
   if (!waveDirty || !waveCache) return;
   waveDirty = false;
@@ -1400,7 +1405,7 @@ async function analyzeWaveform(ref) {
   try { st = await fs.stat(ref.full); } catch { return null; }
   const cache = await loadWaveCache();
   const hit = cache[ref.key];
-  if (hit && hit.key === loudKey(st)) return hit;
+  if (hit && hit.key === loudKey(st) && validWavePeaks(hit.peaks)) return hit;
   if (!(await ffmpegAvailable())) return null;
   const peaks = await extractPeaks(ref.full);
   if (!peaks) return null;
@@ -1410,10 +1415,20 @@ async function analyzeWaveform(ref) {
   return entry;
 }
 
-function enqueueWaveform(ref) {
-  if (!ref || waveQueued.has(ref.key)) return;
+function enqueueWaveform(ref, priority = false) {
+  if (!ref) return;
+  if (waveQueued.has(ref.key)) {
+    // Promote a background-prefetched track if it becomes current before
+    // its turn. The active ffmpeg job is not interruptible, but it will be next.
+    if (priority) {
+      const queuedIndex = waveQueue.findIndex((item) => item.key === ref.key);
+      if (queuedIndex > 0) waveQueue.unshift(...waveQueue.splice(queuedIndex, 1));
+    }
+    return;
+  }
   waveQueued.add(ref.key);
-  waveQueue.push(ref);
+  if (priority) waveQueue.unshift(ref);
+  else waveQueue.push(ref);
   pumpWaveform();
 }
 
@@ -1447,10 +1462,10 @@ app.get('/api/waveform', async (req, res) => {
   try { st = await fs.stat(ref.full); } catch { return res.status(404).json({ error: 'Not found' }); }
   const cache = await loadWaveCache();
   const hit = cache[ref.key];
-  if (hit && hit.key === loudKey(st)) {
+  if (hit && hit.key === loudKey(st) && validWavePeaks(hit.peaks)) {
     return res.json({ status: 'ready', peaks: hit.peaks });
   }
-  enqueueWaveform(ref); // result arrives over /ws
+  enqueueWaveform(ref, req.query.background !== '1'); // result arrives over /ws; current tracks jump the queue
   res.json({ status: 'pending' });
 });
 
@@ -3329,12 +3344,13 @@ async function persistJukePosition(s) {
   await writePositionFromState(s, 5000);
 }
 
-// Graceful Ctrl+C: flush the loudness cache before exit
+// Graceful Ctrl+C: flush analysis and play-count caches before exit.
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     try {
       await settingsFileChain;
       if (loudDirty && loudCache) await writeJsonFile(LOUDNESS_CACHE_FILE, loudCache);
+      if (waveDirty && waveCache) await writeJsonFile(WAVEFORM_CACHE_FILE, waveCache);
       if (playCountsDirty) await writeJsonFile(PLAY_COUNTS_FILE, Object.fromEntries(playCounts));
     } catch { /* best effort */ }
     process.exit(0);
