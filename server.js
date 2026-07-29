@@ -1339,6 +1339,8 @@ async function serveLoudness(req, res) {
 const WAVEFORM_CACHE_FILE = path.join(__dirname, 'waveform-cache.json');
 const WAVEFORM_BUCKETS = 400;
 const WAVEFORM_SAMPLE_RATE = 1000;
+const WAVEFORM_TIMEOUT_MS = 2 * 60 * 1000;
+const WAVEFORM_FAILURE_RETRY_MS = 60 * 60 * 1000;
 let waveCache = null;
 let waveDirty = false;
 const waveQueue = [];
@@ -1355,6 +1357,11 @@ function validWavePeaks(value) {
   return Array.isArray(value) && value.length === WAVEFORM_BUCKETS &&
     value.every((v) => typeof v === 'number' && Number.isFinite(v));
 }
+
+function freshWaveFailure(entry, statKey) {
+  return entry?.key === statKey && entry.unavailable === true &&
+    Date.now() - Number(entry.at || 0) < WAVEFORM_FAILURE_RETRY_MS;
+}
 setInterval(() => {
   if (!waveDirty || !waveCache) return;
   waveDirty = false;
@@ -1365,20 +1372,49 @@ function extractPeaks(full) {
   return new Promise((resolve) => {
     ffmpegBin().then((bin) => {
       const args = [
-        '-hide_banner', '-nostats', '-i', full,
+        // Some MP3s carry book-length lyrics in their metadata. At ffmpeg's
+        // default log level that metadata is copied to stderr line-by-line;
+        // leaving the pipe unread fills it and deadlocks waveform generation.
+        '-hide_banner', '-nostats', '-loglevel', 'error', '-nostdin', '-i', full,
         '-map', 'a:0', '-ac', '1', '-ar', String(WAVEFORM_SAMPLE_RATE),
         '-f', 's16le', '-acodec', 'pcm_s16le', 'pipe:1'
       ];
       const child = spawn(bin, args, { windowsHide: true });
       const chunks = [];
-      const timer = setTimeout(() => child.kill(), 10 * 60 * 1000);
-      child.stdout.on('data', (d) => chunks.push(d));
-      child.on('error', () => { clearTimeout(timer); resolve(null); });
-      child.on('close', () => {
+      let stderrTail = '';
+      let timedOut = false;
+      let settled = false;
+      let timer = null;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        resolve(value);
+      };
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill();
+        console.warn(`  [waveform] analysis timed out: ${path.basename(full)}`);
+        finish(null);
+      }, WAVEFORM_TIMEOUT_MS);
+      child.stdout.on('data', (d) => chunks.push(d));
+      // Always drain stderr even with error-only logging: corrupt inputs can
+      // still be noisy, and no single track may block the serialized queue.
+      child.stderr.on('data', (d) => {
+        stderrTail = `${stderrTail}${d}`.slice(-2000);
+      });
+      child.stdout.on('error', () => { child.kill(); finish(null); });
+      child.on('error', () => finish(null));
+      child.on('close', (code) => {
+        if (timedOut) return finish(null);
+        if (code !== 0) {
+          const detail = stderrTail.trim().replace(/\s+/g, ' ').slice(-500);
+          console.warn(`  [waveform] ffmpeg failed (${code}): ${path.basename(full)}${detail ? ` — ${detail}` : ''}`);
+          return finish(null);
+        }
         const buf = Buffer.concat(chunks);
         const sampleCount = Math.floor(buf.length / 2);
-        if (sampleCount < 1) return resolve(null);
+        if (sampleCount < 1) return finish(null);
         const peaks = new Array(WAVEFORM_BUCKETS).fill(0);
         const perBucket = sampleCount / WAVEFORM_BUCKETS;
         let maxAbs = 1;
@@ -1393,9 +1429,9 @@ function extractPeaks(full) {
           peaks[b] = peak;
           if (peak > maxAbs) maxAbs = peak;
         }
-        resolve(peaks.map((v) => Math.round((v / maxAbs) * 1000) / 1000));
+        finish(peaks.map((v) => Math.round((v / maxAbs) * 1000) / 1000));
       });
-    });
+    }).catch(() => resolve(null));
   });
 }
 
@@ -1405,11 +1441,14 @@ async function analyzeWaveform(ref) {
   try { st = await fs.stat(ref.full); } catch { return null; }
   const cache = await loadWaveCache();
   const hit = cache[ref.key];
-  if (hit && hit.key === loudKey(st) && validWavePeaks(hit.peaks)) return hit;
+  const statKey = loudKey(st);
+  if (hit && hit.key === statKey && validWavePeaks(hit.peaks)) return hit;
+  if (freshWaveFailure(hit, statKey)) return hit;
   if (!(await ffmpegAvailable())) return null;
   const peaks = await extractPeaks(ref.full);
-  if (!peaks) return null;
-  const entry = { key: loudKey(st), peaks, at: Date.now() };
+  const entry = peaks
+    ? { key: statKey, peaks, at: Date.now() }
+    : { key: statKey, unavailable: true, at: Date.now() };
   cache[ref.key] = entry;
   waveDirty = true;
   return entry;
@@ -1442,7 +1481,9 @@ async function pumpWaveform() {
     if (entry) {
       const data = JSON.stringify({
         type: 'waveform', trackKey: ref.key, file: ref.rel,
-        storage: ref.storage, playlist: ref.playlist, peaks: entry.peaks
+        storage: ref.storage, playlist: ref.playlist,
+        status: validWavePeaks(entry.peaks) ? 'ready' : 'unavailable',
+        ...(validWavePeaks(entry.peaks) ? { peaks: entry.peaks } : {})
       });
       for (const c of wssRef.clients) {
         if (c.readyState === WebSocket.OPEN) { try { c.send(data); } catch { /* ignore */ } }
@@ -1462,9 +1503,11 @@ app.get('/api/waveform', async (req, res) => {
   try { st = await fs.stat(ref.full); } catch { return res.status(404).json({ error: 'Not found' }); }
   const cache = await loadWaveCache();
   const hit = cache[ref.key];
-  if (hit && hit.key === loudKey(st) && validWavePeaks(hit.peaks)) {
+  const statKey = loudKey(st);
+  if (hit && hit.key === statKey && validWavePeaks(hit.peaks)) {
     return res.json({ status: 'ready', peaks: hit.peaks });
   }
+  if (freshWaveFailure(hit, statKey)) return res.json({ status: 'unavailable' });
   enqueueWaveform(ref, req.query.background !== '1'); // result arrives over /ws; current tracks jump the queue
   res.json({ status: 'pending' });
 });

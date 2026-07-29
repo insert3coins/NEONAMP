@@ -3127,6 +3127,15 @@ function wsConnect() {
       return;
     }
     if (msg.type === 'waveform') {
+      if (msg.status === 'unavailable') {
+        if (cur >= 0 && trackKey(pl[cur]) === msg.trackKey) {
+          clearTimeout(waveformPollTimer);
+          waveformPollTimer = null;
+          waveformState = 'unavailable';
+          drawSeekWaveform();
+        }
+        return;
+      }
       if (validWaveformPeaks(msg.peaks)) {
         // Background analyses are useful even when their track is not
         // current; retain them so the upcoming playlist transition is instant.
